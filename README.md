@@ -15,8 +15,8 @@ Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel A
 Requires **Node.js 22.9+**.
 
 ```bash
-git clone https://github.com/axlezhao/Travel-Agent-Demo.git
-cd Travel-Agent-Demo
+git clone https://github.com/axlezhao/Wanderly.git
+cd Wanderly
 npm install
 npm start
 ```
@@ -97,7 +97,7 @@ A policy is anything with `decide()` and `observe()`, so adding a new brain does
   "mcpServers": {
     "travel-tools": {
       "command": "node",
-      "args": ["/absolute/path/to/Travel-Agent-Demo/src/mcp/server.js"]
+      "args": ["/absolute/path/to/Wanderly/src/mcp/server.js"]
     }
   }
 }
