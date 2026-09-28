@@ -21,8 +21,14 @@ test("demo parser extracts destination and trip length", () => {
     ["5 days exploring seoul", "Seoul", 5],
   ];
   for (const [message, destination, days] of cases) {
-    assert.deepEqual(parseRequest(message), { destination, days }, message);
+    assert.deepEqual(parseRequest(message), { destination, days, travelMode: null }, message);
   }
+});
+
+test("demo parser reads the Getting around preference and ignores its tag when finding the destination", () => {
+  assert.deepEqual(parseRequest("5 days in Rome\n\n[Getting around: driving (I'll have a car)]"), { destination: "Rome", days: 5, travelMode: "drive" });
+  assert.equal(parseRequest("Kyoto\n\n[Getting around: walking and public transit]").travelMode, "transit");
+  assert.equal(parseRequest("Kyoto\n\n[Getting around: cycling where possible]").destination, "Kyoto");
 });
 
 test("model config validation", () => {

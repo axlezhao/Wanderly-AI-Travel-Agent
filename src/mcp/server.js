@@ -19,7 +19,9 @@ import {
   findAttractions,
   findPlaces,
   getExchangeRate,
+  compareRoutes,
   PLACE_CATEGORIES,
+  ROUTE_MODES,
 } from "../tools/travel-apis.js";
 
 const server = new McpServer({ name: "travel-tools", version: "1.0.0" });
@@ -134,6 +136,27 @@ register(
     },
   },
   getExchangeRate,
+);
+
+register(
+  "compare_routes",
+  {
+    title: "Compare routes",
+    description:
+      "How to get between two points: travel time by walking, cycling, driving (OpenStreetMap routing) and public " +
+      "transit with real line names (Transitous), plus a recommended mode. Use it to suggest how to get around each " +
+      "day, between neighborhoods or sights, and between cities.",
+    inputSchema: {
+      from_latitude: lat,
+      from_longitude: lon,
+      to_latitude: lat,
+      to_longitude: lon,
+      from_name: z.string().optional().describe("Label for the start, e.g. 'Hotel' or 'Colosseum'"),
+      to_name: z.string().optional().describe("Label for the destination"),
+      modes: z.array(z.enum(ROUTE_MODES)).optional().describe("Modes to compare (default: all)"),
+    },
+  },
+  compareRoutes,
 );
 
 // A reusable prompt so MCP clients like Claude Desktop get a one-click "plan a trip".

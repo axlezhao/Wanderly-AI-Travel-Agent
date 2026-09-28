@@ -3,16 +3,19 @@
 Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
 
 - **ReAct architecture**: the agent loops *Thought → Action → Observation* until it can give a *Final Answer*, and the UI shows every step live.
-- **MCP tool server**: six travel tools behind the [Model Context Protocol](https://modelcontextprotocol.io). The web app uses them over MCP, and so can Claude Desktop or Claude Code.
+- **MCP tool server, in Node.js or Go**: seven travel tools behind the [Model Context Protocol](https://modelcontextprotocol.io), with two interchangeable implementations of the same server. The web app uses them over MCP, and so can Claude Desktop or Claude Code.
 - **Pluggable brain**: Claude, DeepSeek, OpenAI, Groq, OpenRouter, a local Ollama… Add a model from the UI by typing its API key, or run the no-key **Demo** policy.
 - **Production-style harness**: step limits, per-tool timeouts, retries with backoff, cancellation, caching, output truncation, JSONL traces, unit tests and an eval suite.
+- **Getting around**: each day ends with a transport recommendation (walk, bike, drive or transit, with real bus/metro/train lines). Set your preference in the chat box, or the agent asks you when it matters (for example a multi-city trip).
+- **Replies in your language**: ask in Chinese, Spanish or anything else and the plan comes back in that language.
+- **Short-term memory and chat history**: the agent remembers the conversation (even when you switch models), and a page refresh restores the chat, map and trip board. Everything is forgotten when you close the tab.
 - **Free data, no keys**: Open-Meteo, Wikivoyage/Wikipedia, Wikidata, OpenStreetMap and ECB exchange rates.
 
 ---
 
 ## Quick start
 
-Requires **Node.js 22.9+**.
+Requires **Node.js 22.9+**. Go 1.25+ is optional, needed only for the Go MCP server.
 
 ```bash
 git clone https://github.com/axlezhao/Wanderly-AI-Travel-Agent.git
@@ -43,7 +46,7 @@ flowchart LR
     P --- O["OpenAI-compatible<br/>DeepSeek, OpenAI, Ollama…"]
     P --- D[Demo rules]
     H -- "callTool()" --> T["MCP client<br/>toolbox.js"]
-    T == stdio ==> M["MCP server<br/>src/mcp/server.js"]
+    T == stdio ==> M["MCP server<br/>Node: src/mcp/server.js<br/>or Go: mcp-go/"]
     M --> A["Free APIs<br/>Open-Meteo · Wikivoyage · Wikipedia<br/>Wikidata · OpenStreetMap · ECB"]
 ```
 
@@ -75,9 +78,21 @@ The model only decides *what to do next*. [`src/harness/harness.js`](src/harness
 
 A policy is anything with `decide()` and `observe()`, so adding a new brain doesn't touch the harness.
 
-### The MCP server
+### The MCP server (Node.js or Go)
 
-[`src/mcp/server.js`](src/mcp/server.js) exposes six read-only tools (zod-validated inputs) plus a `plan_trip` prompt:
+There are two implementations of the same server, with the same tools, schemas and result format:
+
+| | Node.js (default) | Go |
+|---|---|---|
+| Code | [`src/mcp/server.js`](src/mcp/server.js) + [`src/tools/travel-apis.js`](src/tools/travel-apis.js) | [`mcp-go/`](mcp-go/) |
+| SDK | `@modelcontextprotocol/sdk` | official [`go-sdk`](https://github.com/modelcontextprotocol/go-sdk) |
+| Run the app with it | `npm start` | `npm run start:go` (builds, then sets `MCP_SERVER=go`) |
+| Tests | `npm test` | `npm run test:go` |
+
+The agent and web UI don't change at all when you switch. That's the point of MCP: tools written in one language, used by an agent written in another. `npm test` runs the same contract tests against both servers and checks that their tool schemas are identical.
+
+
+[`src/mcp/server.js`](src/mcp/server.js) exposes seven read-only tools (zod-validated inputs) plus a `plan_trip` prompt:
 
 | Tool | Data source |
 |---|---|
@@ -87,6 +102,9 @@ A policy is anything with `decide()` and `observe()`, so adding a new brain does
 | `find_attractions` | OpenStreetMap sights with a Wikidata entry, ranked by Wikipedia page views |
 | `find_places` | OpenStreetMap via Overpass: restaurants, cafés, bars, hotels, museums, parks… |
 | `get_exchange_rate` | Frankfurter (European Central Bank rates) |
+| `compare_routes` | Walking, cycling and driving times from OpenStreetMap routing (routing.openstreetmap.de), public transit with real line names from [Transitous](https://transitous.org), plus a recommended mode |
+
+**Go version in Claude Desktop/Code:** build it with `npm run build:go`, then use `"command": "/absolute/path/to/Wanderly-AI-Travel-Agent/mcp-go/bin/wanderly-mcp"` with no `args`.
 
 **Use it from Claude Code:** this repo includes `.mcp.json`, so running `claude` in the project folder offers the `travel-tools` server.
 
@@ -126,13 +144,14 @@ To add a new kind of provider, write a policy class in `src/policies/` with `add
 ## Tests and evals
 
 ```bash
-npm test                                   # 17 offline tests: harness guarantees, MCP contract, policies
+npm test                                   # 27 offline tests: harness, memory, MCP contract (Node + Go servers), policies
+npm run test:go                            # Go server unit tests (mock HTTP servers, in-memory MCP client)
 npm run eval                               # live end-to-end scenarios with the default model
 npm run eval -- --model demo               # a specific model (ids: npm run eval -- --list)
 npm run eval -- --only kyoto,lisbon-food   # a subset
 ```
 
-`npm test` needs no network or keys. It uses a fake toolbox, scripted policies, and a mock OpenAI-style server that streams fragmented tool calls.
+`npm test` needs no network or keys. It uses a fake toolbox, scripted policies, and a mock OpenAI-style server that streams fragmented tool calls. If Go is installed, it also runs the MCP contract tests against the Go server.
 
 `npm run eval` runs real trip requests through the full stack and scores them with automatic checks: *looked up the destination first*, *names ≥3 real sights returned by the tools* (a grounding check against hallucinated places), *used last year's weather for far-off dates*, *admits when a place doesn't exist*, *≤ 6 steps*. Results are saved to `evals/results/` so you can compare models or prompt changes.
 
@@ -149,7 +168,7 @@ src/
     toolbox.js                MCP client (spawns + talks to the MCP server)
     tracer.js                 JSONL traces → traces/
     labels.js                 human-readable action/observation labels
-  mcp/server.js               MCP server exposing the travel tools
+  mcp/server.js               MCP server exposing the travel tools (Node.js)
   tools/travel-apis.js        the free-API implementations
   policies/
     claude.js                 Claude (Anthropic SDK)
@@ -159,7 +178,21 @@ src/
   models/registry.js          model list, presets, discovery, connection test
 test/                         node:test unit tests
 scripts/eval.js               end-to-end eval suite
+mcp-go/                       the same MCP server in Go
+  main.go                     server setup, tool schemas, plan_trip prompt
+  tools.go                    the seven tools (same output as the Node version)
+  httpx.go                    HTTP client: timeouts, cancellation, cache, error classes
+  tools_test.go               offline tests with mock APIs
 ```
+
+## Memory and chat history
+
+| | Where it lives | What it holds | When it's cleared |
+|---|---|---|---|
+| **Short-term memory** | Server RAM only ([`src/harness/sessions.js`](src/harness/sessions.js)), never on disk | The conversation: your messages and the agent's answers (last 40 turns), each model's own history, and cached tool results | You close the tab (the page sends a beacon; a 15 s grace period keeps it through a reload), **Forget** / **New trip**, 30 min idle, or a server restart |
+| **Chat history** | The browser tab's `sessionStorage` | Every turn's events, so a refresh rebuilds the chat, reasoning trace, map and trip board | The browser clears it when the tab closes; **Forget** clears it now |
+
+Memory is shared across models: plan with DeepSeek, switch to Claude, and ask "what did we decide?" If the server restarts while the tab is open, the page hands the conversation back so the agent's memory matches what you see.
 
 ## Limits
 

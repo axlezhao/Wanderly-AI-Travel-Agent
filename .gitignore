@@ -6,3 +6,5 @@ models.local.json
 traces/
 evals/results/
 .DS_Store
+# Compiled Go MCP server (build with: npm run build:go)
+mcp-go/bin/

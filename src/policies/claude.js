@@ -58,6 +58,14 @@ export class ClaudePolicy {
     });
   }
 
+  // Short-term memory: catch up on turns another model handled in this session.
+  seedHistory(entries) {
+    for (const e of entries) {
+      if (e.role === "user") this.addUserMessage(e.text);
+      else this.messages.push({ role: "assistant", content: e.text });
+    }
+  }
+
   async decide({ forceAnswer, emit, signal }) {
     const message = await this.#callModel({ forceAnswer, emit, signal });
     this.messages.push({ role: "assistant", content: message.content });

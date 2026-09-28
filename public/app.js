@@ -35,7 +35,12 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
-const layers = { home: L.layerGroup().addTo(map), sights: L.layerGroup().addTo(map), food: L.layerGroup().addTo(map) };
+const layers = {
+  home: L.layerGroup().addTo(map),
+  sights: L.layerGroup().addTo(map),
+  food: L.layerGroup().addTo(map),
+  routes: L.layerGroup().addTo(map),
+};
 const pin = (cls, label) => L.divIcon({ className: "", html: `<div class="pin ${cls}">${label}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] });
 const popup = (title, body = "") => {
   const div = el("div");
@@ -79,8 +84,9 @@ function fitToMarkers() {
 const board = {
   destination({ place }) {
     Object.values(layers).forEach((l) => l.clearLayers());
-    ["guide", "weather", "sights", "food", "money"].forEach((id) => ($(`#${id}`).hidden = true));
+    ["guide", "weather", "sights", "food", "routes", "money"].forEach((id) => ($(`#${id}`).hidden = true));
     $("#place-list").replaceChildren();
+    $("#route-list").replaceChildren();
     $("#board-empty").hidden = true;
     L.marker([place.latitude, place.longitude], { icon: pin("home", "★") })
       .bindPopup(popup(place.name, [place.region, place.country].filter(Boolean).join(", ")))
@@ -191,6 +197,35 @@ const board = {
     $("#food").hidden = false;
   },
 
+  routes(r) {
+    const icon = { walk: "🚶", bike: "🚲", drive: "🚗", transit: "🚇" };
+    const li = el("li", "route");
+    li.append(el("div", "leg", `${r.from.name} → ${r.to.name}`));
+    const modes = el("div", "modes");
+    for (const o of r.options) {
+      if (o.minutes == null) continue;
+      const chip = el("span", `mode${o.mode === r.recommended.mode ? " best" : ""}`, `${icon[o.mode]} ${o.minutes} min`);
+      chip.title = o.mode === "transit" ? o.lines.join(" → ") : `${o.km} km`;
+      modes.append(chip);
+    }
+    li.append(modes, el("div", "why", r.recommended.reason));
+    // Show the recommended route on the map (transit has no geometry: draw the walking line, or a straight dashed one).
+    const show = () => {
+      layers.routes.clearLayers();
+      document.querySelectorAll(".route.active").forEach((n) => n.classList.remove("active"));
+      li.classList.add("active");
+      const withLine = r.options.find((o) => o.mode === r.recommended.mode && o.geometry) ?? r.options.find((o) => o.geometry);
+      const pts = withLine?.geometry ?? [[r.from.latitude, r.from.longitude], [r.to.latitude, r.to.longitude]];
+      const line = L.polyline(pts, { color: "#0e7a6f", weight: 5, opacity: 0.85, dashArray: withLine ? null : "8 8" }).addTo(layers.routes);
+      const bounds = line.getBounds().pad(0.2);
+      moveMap((animate) => (animate ? map.flyToBounds(bounds, { duration: 0.8, maxZoom: 16 }) : map.fitBounds(bounds, { maxZoom: 16 })));
+    };
+    li.addEventListener("click", show);
+    $("#route-list").append(li);
+    $("#routes").hidden = false;
+    if ($("#route-list").children.length === 1) show();
+  },
+
   currency(c) {
     const card = $("#money");
     card.replaceChildren(el("h2", "", "Money"));
@@ -222,7 +257,7 @@ function createTurn() {
   const steps = {}; // step number -> { li, actions }
   const actions = {}; // action id -> element
   let draft = "";
-  let renderQueued = false;
+  let frame = 0; // pending requestAnimationFrame for the streamed draft
   const answerEl = $(".answer", node);
 
   const stepFor = (n) => {
@@ -239,16 +274,22 @@ function createTurn() {
   };
 
   const flushDraft = () => {
-    renderQueued = false;
+    frame = 0;
     renderMarkdown(answerEl, draft);
     scrollDown();
+  };
+  // Drop a pending draft render so it can't overwrite what we're about to show.
+  const cancelDraft = () => {
+    cancelAnimationFrame(frame);
+    frame = 0;
+    draft = "";
   };
 
   return {
     handle(e) {
       switch (e.type) {
         case "step_start":
-          draft = "";
+          cancelDraft();
           $(".trace-meta", node).textContent = `step ${e.step}${e.forceAnswer ? " (final)" : ""}…`;
           break;
 
@@ -256,14 +297,11 @@ function createTurn() {
           // Text streams before we know whether it's a Thought or the Answer; show it live.
           draft += e.text;
           answerEl.classList.add("streaming");
-          if (!renderQueued) {
-            renderQueued = true;
-            requestAnimationFrame(flushDraft);
-          }
+          frame ||= requestAnimationFrame(flushDraft);
           break;
 
         case "draft_reset":
-          draft = "";
+          cancelDraft();
           answerEl.replaceChildren();
           break;
 
@@ -272,7 +310,7 @@ function createTurn() {
           const s = stepFor(e.step);
           s.thought.replaceChildren(el("span", "label", "Thought"), document.createTextNode(e.text.replace(/^Thought:\s*/i, "")));
           // The streamed text was a thought, not the answer.
-          draft = "";
+          cancelDraft();
           answerEl.replaceChildren();
           answerEl.classList.remove("streaming");
           break;
@@ -325,6 +363,7 @@ function createTurn() {
         }
 
         case "answer":
+          cancelDraft();
           answerEl.classList.remove("streaming");
           renderMarkdown(answerEl, e.text);
           $(".trace", node).open = false;
@@ -332,6 +371,7 @@ function createTurn() {
           break;
 
         case "error":
+          cancelDraft();
           answerEl.classList.remove("streaming");
           node.append(el("div", "run-error", e.message));
           break;
@@ -362,11 +402,95 @@ function scrollDown() {
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Chat history, for this tab only. sessionStorage survives reloads and is wiped
+// by the browser when the tab closes: the same lifetime as the agent's
+// short-term memory on the server.
+// ---------------------------------------------------------------------------
+const HISTORY_KEY = "wanderly-history";
+const chatHistory = {
+  load() {
+    try {
+      return JSON.parse(sessionStorage.getItem(HISTORY_KEY)) ?? [];
+    } catch {
+      return [];
+    }
+  },
+  save(turns) {
+    // If the storage quota is hit, drop the oldest turns until it fits.
+    for (let kept = turns; kept.length; kept = kept.slice(1)) {
+      try {
+        sessionStorage.setItem(HISTORY_KEY, JSON.stringify(kept));
+        return;
+      } catch {}
+    }
+  },
+  clear() {
+    try {
+      sessionStorage.removeItem(HISTORY_KEY);
+    } catch {}
+  },
+};
+state.turns = chatHistory.load();
+
+// Replay saved turns: the same events rebuild the chat, the reasoning trace, the map and the trip board.
+function restoreHistory() {
+  if (!state.turns.length) return;
+  $("#empty")?.remove();
+  for (const t of state.turns) {
+    $("#messages").append(el("div", "user-msg", t.message));
+    const turn = createTurn();
+    for (const e of t.events) turn.handle(e);
+  }
+  $("#travel-mode").value = state.turns.at(-1).travelMode ?? "";
+  $("#messages").scrollTop = $("#messages").scrollHeight;
+}
+
+function updateMemory(turns) {
+  const box = $("#memory");
+  box.hidden = turns === 0;
+  $("#memory-text").textContent = `🧠 Remembers ${turns} message${turns === 1 ? "" : "s"} · cleared when you close this tab`;
+}
+
+async function syncMemory() {
+  try {
+    let { turns } = await (await fetch(`/api/session/${state.sessionId}`)).json();
+    // The server restarted but this tab still has the chat: hand the conversation back.
+    if (turns === 0 && state.turns.length) {
+      const body = { turns: state.turns.map(({ message, travelMode, answer }) => ({ message, travelMode, answer })) };
+      ({ turns } = await (await fetch(`/api/session/${state.sessionId}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })).json());
+    }
+    updateMemory(turns);
+  } catch {}
+}
+
+async function forget() {
+  state.controller?.abort();
+  chatHistory.clear();
+  await fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId: state.sessionId }) });
+  location.reload();
+}
+
+// Closing the tab: tell the server to forget this session (a reload cancels it).
+addEventListener("pagehide", () => navigator.sendBeacon?.(`/api/session/${state.sessionId}/close`));
+
 async function send(text) {
   if (state.busy || !text.trim()) return;
   $("#empty")?.remove();
   $("#messages").append(el("div", "user-msg", text));
   const turn = createTurn();
+  const record = { message: text, travelMode: $("#travel-mode").value, model: $("#model-select").selectedOptions[0]?.textContent, events: [] };
+  state.turns.push(record);
+  const handle = (e) => {
+    turn.handle(e);
+    if (e.type === "draft_delta") return; // the final answer event carries the full text
+    record.events.push(e);
+    if (e.type === "answer") record.answer = e.text;
+  };
   $("#messages").scrollTop = $("#messages").scrollHeight;
   setBusy(true);
 
@@ -375,7 +499,7 @@ async function send(text) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: state.sessionId, message: text, modelId: state.modelId }),
+      body: JSON.stringify({ sessionId: state.sessionId, message: text, modelId: state.modelId, travelMode: record.travelMode }),
       signal: state.controller.signal,
     });
     if (!res.ok) {
@@ -390,12 +514,14 @@ async function send(text) {
       buffer += value;
       const lines = buffer.split("\n");
       buffer = lines.pop();
-      for (const line of lines) if (line.trim()) turn.handle(JSON.parse(line));
+      for (const line of lines) if (line.trim()) handle(JSON.parse(line));
     }
   } catch (err) {
-    turn.handle({ type: "error", message: err.name === "AbortError" ? "Stopped." : err.message });
+    handle({ type: "error", message: err.name === "AbortError" ? "Stopped." : err.message });
   } finally {
     setBusy(false);
+    chatHistory.save(state.turns);
+    syncMemory();
   }
 }
 
@@ -434,11 +560,8 @@ $("#composer").addEventListener("submit", (e) => {
 });
 document.querySelectorAll(".suggestions button").forEach((b) => b.addEventListener("click", () => send(b.textContent)));
 
-$("#new-trip").addEventListener("click", async () => {
-  state.controller?.abort();
-  await fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId: state.sessionId }) });
-  location.reload();
-});
+$("#new-trip").addEventListener("click", forget);
+$("#forget").addEventListener("click", forget);
 
 addEventListener("resize", () => {
   if (map.getContainer().offsetWidth) showMap();
@@ -580,7 +703,10 @@ form.addEventListener("submit", async (e) => {
       return o;
     }));
     applyPreset(status.presets[0].id);
-    $("#tools").append(el("span", "tools-label", "MCP tools connected:"), ...status.tools.map((t) => {
+    restoreHistory();
+    syncMemory();
+    const serverName = { go: "Go", node: "Node.js" }[status.mcpServer] ?? status.mcpServer;
+    $("#tools").append(el("span", "tools-label", `MCP tools connected (${serverName} server):`), ...status.tools.map((t) => {
       const chip = el("span", "", t.name);
       chip.title = t.description;
       return chip;

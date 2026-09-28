@@ -47,6 +47,20 @@
           </div>
         </div>
       </div>
+      <div class="composer-options">
+        <label for="travel-mode">Getting around</label>
+        <select id="travel-mode">
+          <option value="">Let Wanderly suggest</option>
+          <option value="transit">🚇 Walking + public transit</option>
+          <option value="drive">🚗 I'll have a car</option>
+          <option value="walk">🚶 Walk as much as possible</option>
+          <option value="bike">🚲 Cycling</option>
+        </select>
+        <span id="memory" class="memory" hidden>
+          <span id="memory-text"></span>
+          <button type="button" id="forget" class="link-btn" title="Clear the chat and the agent's memory now">Forget</button>
+        </span>
+      </div>
       <form id="composer" class="composer">
         <textarea id="input" rows="1" placeholder="e.g. 4 days in Barcelona, I love architecture and tapas" aria-label="Message"></textarea>
         <button id="send" type="submit" class="primary" aria-label="Send">
@@ -74,6 +88,10 @@
         <section id="food" class="card" hidden>
           <h2>Eat &amp; drink <span class="sub">from OpenStreetMap</span></h2>
           <ul class="place-list" id="place-list"></ul>
+        </section>
+        <section id="routes" class="card" hidden>
+          <h2>Getting around <span class="sub">walk · bike · drive · transit</span></h2>
+          <ul class="route-list" id="route-list"></ul>
         </section>
         <section id="money" class="card" hidden></section>
       </div>

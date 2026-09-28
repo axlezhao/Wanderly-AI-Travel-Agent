@@ -8,19 +8,31 @@
 //     close(): Promise<void>
 //   }
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_SERVER = {
-  command: process.execPath, // the same `node` running this app
-  args: [path.join(here, "..", "mcp", "server.js")],
-};
+const root = path.join(here, "..", "..");
+
+// Two interchangeable implementations of the same MCP server:
+//   node (default)  src/mcp/server.js
+//   go              mcp-go/  (the compiled binary if you ran `npm run build:go`, else `go run`)
+export function serverParamsFor(kind = process.env.MCP_SERVER || "node") {
+  if (kind === "go") {
+    const binary = path.join(root, "mcp-go", "bin", process.platform === "win32" ? "wanderly-mcp.exe" : "wanderly-mcp");
+    return fs.existsSync(binary)
+      ? { kind, command: binary, args: [] }
+      : { kind, command: "go", args: ["run", "."], cwd: path.join(root, "mcp-go") };
+  }
+  return { kind: "node", command: process.execPath, args: [path.join(root, "src", "mcp", "server.js")] };
+}
 
 export class McpToolbox {
-  constructor(serverParams = DEFAULT_SERVER) {
+  constructor(serverParams = serverParamsFor()) {
+    this.kind = serverParams.kind ?? "custom";
     this.serverParams = serverParams;
     this.client = null;
     this.tools = null;
@@ -32,7 +44,8 @@ export class McpToolbox {
     // Share one in-flight connection attempt between concurrent callers.
     this.connecting ??= (async () => {
       const client = new Client({ name: "travel-agent-harness", version: "1.0.0" });
-      const transport = new StdioClientTransport({ ...this.serverParams, stderr: "pipe" });
+      const { kind, ...params } = this.serverParams;
+      const transport = new StdioClientTransport({ ...params, stderr: "pipe" });
       transport.stderr?.on("data", (d) => process.stderr.write(`[mcp] ${d}`));
       // If the server process dies, reconnect on the next call.
       transport.onclose = () => {

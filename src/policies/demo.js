@@ -5,7 +5,8 @@
 // is a fixed plan:
 //   step 1  search_destination
 //   step 2  travel guide + weather + sights + restaurants + cafés + currency, in parallel
-//   step 3  assemble a day-by-day itinerary from the observations
+//   step 3  compare routes between each day's sights (walk / bike / drive / transit)
+//   step 4  assemble a day-by-day itinerary from the observations
 
 import { randomUUID } from "node:crypto";
 
@@ -22,8 +23,15 @@ const HOME_CURRENCY = process.env.HOME_CURRENCY || "USD";
 
 const NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, a: 1, an: 1, weekend: 2 };
 
+// The "Getting around" picker arrives as a tagged line appended by the server.
+const PREFERENCE_TAG = /\[Getting around: ([^\]]+)\]/i;
+const MODE_ICON = { walk: "🚶", bike: "🚲", drive: "🚗", transit: "🚇" };
+const MODE_WORD = { walk: "walk", bike: "bike", drive: "drive", transit: "transit" };
+
 export function parseRequest(message) {
-  const text = message.trim();
+  const pref = message.match(PREFERENCE_TAG)?.[1] ?? "";
+  const travelMode = /driv/i.test(pref) ? "drive" : /cycl|bik/i.test(pref) ? "bike" : /transit/i.test(pref) ? "transit" : /walk/i.test(pref) ? "walk" : null;
+  const text = message.replace(PREFERENCE_TAG, "").trim();
   let days = 3;
   const m = text.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|a|an)[\s-]*(day|night)s?\b/i);
   if (m) days = Number(m[1]) || NUMBER_WORDS[m[1].toLowerCase()] || 3;
@@ -39,7 +47,7 @@ export function parseRequest(message) {
     // otherwise the first capitalized phrase that isn't the start of a sentence word like "Plan"
     text.match(/(?<![.!?]\s|^)\b([A-Z][\p{L}'’.-]+(?:\s+[A-Z][\p{L}'’.-]+)*)/u)?.[1] ??
     text.replace(/\b(plan|a|an|the|trip|days?|nights?|weekend|for|me|please|to|in|\d+)\b/gi, "").trim();
-  return { destination: place.replace(/[.,!?]+$/, "").trim(), days };
+  return { destination: place.replace(/[.,!?]+$/, "").trim(), days, travelMode };
 }
 
 export class DemoPolicy {
@@ -74,7 +82,7 @@ export class DemoPolicy {
           answer: `I couldn't find a place called **${destination}**. Could you check the spelling or name a nearby city?`,
         };
       }
-      this.stage = "answer";
+      this.stage = "routes";
       const { latitude, longitude } = place;
       const currency = CURRENCY[place.country_code];
       const actions = [
@@ -91,6 +99,29 @@ export class DemoPolicy {
           `travel guide, weather, top sights, restaurants, cafés${actions.length > 5 ? " and the exchange rate" : ""}.`,
         actions,
       };
+    }
+
+    if (this.stage === "routes") {
+      this.stage = "answer";
+      this.dayPlan = planDays(this.obs.find_attractions?.attractions ?? [], days);
+      // One comparison per day (first to last sight), for up to 3 days.
+      const actions = this.dayPlan
+        .filter((todays) => todays.length >= 2)
+        .slice(0, 3)
+        .map((todays) => {
+          const [a, b] = [todays[0], todays.at(-1)];
+          return action("compare_routes", {
+            from_latitude: a.latitude, from_longitude: a.longitude, from_name: a.name,
+            to_latitude: b.latitude, to_longitude: b.longitude, to_name: b.name,
+          });
+        });
+      if (actions.length) {
+        const pref = this.request.travelMode ? ` The traveler prefers ${this.request.travelMode}.` : "";
+        return {
+          thought: `I've grouped nearby sights into days. Now I'll compare walking, cycling, driving and transit between each day's stops.${pref}`,
+          actions,
+        };
+      }
     }
 
     const answer = this.#compose();
@@ -113,6 +144,10 @@ export class DemoPolicy {
         data = JSON.parse(o.content);
       } catch {
         continue; // truncated by the harness; skip it
+      }
+      if (o.tool === "compare_routes") {
+        (this.obs.routes ??= {})[`${o.input.from_name}→${o.input.to_name}`] = data;
+        continue;
       }
       const key = o.tool === "find_places" ? `places_${o.input.category}` : o.tool;
       this.obs[key] = data;
@@ -137,11 +172,9 @@ export class DemoPolicy {
       lines.push(`**Weather** (${src}): ` + weather.slice(0, days).map((w) => `${w.icon} ${fmtDay(w.date)} ${Math.round(w.high_c)}°/${Math.round(w.low_c)}°`).join(" · "), "");
     }
 
-    // Pair each day's sights by proximity: sort by longitude so neighbors share a day.
-    const pool = [...sights].sort((a, b) => a.longitude - b.longitude);
-    const perDay = Math.max(1, Math.min(3, Math.floor(pool.length / days) || 1));
+    const plan = this.dayPlan ?? planDays(sights, days);
     for (let d = 0; d < days; d++) {
-      const todays = pool.splice(0, perDay);
+      const todays = plan[d] ?? [];
       const w = weather[d];
       const wet = w && (w.precipitation_mm > 3 || /rain|storm|shower/i.test(w.condition));
       lines.push(`## Day ${d + 1}${todays[0] ? ` — ${todays[0].name}` : ""}`);
@@ -153,6 +186,8 @@ export class DemoPolicy {
       if (cafe) lines.push(`- **Coffee break:** ${cafe.name}${cafe.opening_hours ? ` (${cafe.opening_hours})` : ""}`);
       const dinner = food[d];
       if (dinner) lines.push(`- **Dinner:** ${dinner.name}${dinner.cuisine ? ` · ${dinner.cuisine}` : ""}${dinner.website ? ` · [website](${dinner.website})` : ""}`);
+      const route = todays.length >= 2 && this.obs.routes?.[`${todays[0].name}→${todays.at(-1).name}`];
+      if (route) lines.push(`- **Getting around:** ${describeRoute(route, this.request.travelMode)}`);
       lines.push("");
     }
 
@@ -168,6 +203,28 @@ export class DemoPolicy {
     );
     return lines.join("\n");
   }
+}
+
+// Pair each day's sights by proximity: sort by longitude so neighbors share a day.
+function planDays(sights, days) {
+  const pool = [...sights].sort((a, b) => a.longitude - b.longitude);
+  const perDay = Math.max(1, Math.min(3, Math.floor(pool.length / days) || 1));
+  return Array.from({ length: days }, () => pool.splice(0, perDay));
+}
+
+// "🚇 Transit 18 min (Metro A → Bus 64) from X to Y · or 🚶 35 min walk, 🚗 9 min drive"
+function describeRoute(route, preferred) {
+  const ok = route.options.filter((o) => o.minutes != null);
+  const walk = ok.find((o) => o.mode === "walk");
+  // Even with a car, a short hop is better on foot (no parking, no restricted zones).
+  const leaveTheCar = preferred === "drive" && walk && walk.minutes <= 15;
+  const pick = leaveTheCar ? walk : ok.find((o) => o.mode === preferred) ?? ok.find((o) => o.mode === route.recommended.mode) ?? ok[0];
+  if (!pick) return "no route found";
+  const lines = pick.mode === "transit" && pick.lines?.length ? ` (${pick.lines.join(" → ")})` : "";
+  const others = ok.filter((o) => o !== pick).map((o) => `${MODE_ICON[o.mode]} ${o.minutes} min ${MODE_WORD[o.mode]}`);
+  const why = leaveTheCar ? " (leave the car parked, it's close)" : pick.mode === route.recommended.mode ? "" : " (your preference)";
+  return `${MODE_ICON[pick.mode]} ${MODE_WORD[pick.mode]} ${pick.minutes} min${lines} from ${route.from} to ${route.to}${why}` +
+    (others.length ? ` · or ${others.join(", ")}` : "");
 }
 
 function titleCase(s) {

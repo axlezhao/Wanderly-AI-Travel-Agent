@@ -391,6 +391,108 @@ export async function findPlaces({ latitude, longitude, category, radius_m = 150
 }
 
 // ---------------------------------------------------------------------------
+// compare_routes: walking, cycling and driving (OSRM on routing.openstreetmap.de)
+// and public transit (Transitous), with a recommended mode.
+// ---------------------------------------------------------------------------
+export const ROUTE_MODES = ["walk", "bike", "drive", "transit"];
+const OSRM_PROFILES = { walk: "foot", bike: "bike", drive: "car" };
+// Beyond these straight-line distances a mode is pointless (and slow to compute).
+const MAX_KM = { walk: 25, bike: 60, drive: 1500, transit: 1500 };
+const TRANSIT_NAMES = {
+  SUBWAY: "Metro", METRO: "Metro", BUS: "Bus", COACH: "Coach", TRAM: "Tram", FERRY: "Ferry", FUNICULAR: "Funicular",
+  RAIL: "Train", REGIONAL_RAIL: "Train", REGIONAL_FAST_RAIL: "Train", HIGHSPEED_RAIL: "High-speed train",
+  LONG_DISTANCE: "Train", NIGHT_RAIL: "Night train", SUBURBAN: "Suburban train", CABLE_CAR: "Cable car", AERIAL_LIFT: "Cable car",
+};
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lon2 - lon1) / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(a));
+}
+
+async function osrmRoute(mode, from, to, signal) {
+  const url =
+    `https://routing.openstreetmap.de/routed-${OSRM_PROFILES[mode]}/route/v1/driving/` +
+    `${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=simplified&geometries=geojson`;
+  const data = await getJSON(url, { signal, timeoutMs: 15000 });
+  const route = data.routes?.[0];
+  if (data.code !== "Ok" || !route) throw new ToolError(`No ${mode} route found.`);
+  return {
+    mode,
+    minutes: Math.round(route.duration / 60),
+    km: Math.round(route.distance / 100) / 10,
+    // [lon, lat] -> [lat, lon] for the map
+    geometry: route.geometry.coordinates.map(([lon, lat]) => [lat, lon]),
+  };
+}
+
+async function transitRoute(from, to, signal) {
+  const url =
+    `https://api.transitous.org/api/v1/plan?fromPlace=${from.latitude},${from.longitude}` +
+    `&toPlace=${to.latitude},${to.longitude}&numItineraries=3`;
+  const data = await getJSON(url, { signal, timeoutMs: 20000 });
+  const usable = (data.itineraries ?? []).filter((it) => it.legs.some((l) => l.mode !== "WALK"));
+  if (usable.length === 0) throw new ToolError("No public transit connection found.");
+  const best = usable.reduce((a, b) => (b.duration < a.duration ? b : a));
+  const rides = best.legs.filter((l) => l.mode !== "WALK");
+  return {
+    mode: "transit",
+    minutes: Math.round(best.duration / 60),
+    transfers: best.transfers ?? Math.max(0, rides.length - 1),
+    walk_minutes: Math.round(best.legs.filter((l) => l.mode === "WALK").reduce((sum, l) => sum + l.duration, 0) / 60),
+    lines: rides.map((l) => `${TRANSIT_NAMES[l.mode] ?? l.mode.charAt(0) + l.mode.slice(1).toLowerCase()} ${l.routeShortName ?? l.headsign ?? ""}`.trim()),
+  };
+}
+
+// A simple, explainable rule the agent can accept or override.
+export function recommendMode(options) {
+  const by = Object.fromEntries(options.filter((o) => o.minutes != null).map((o) => [o.mode, o]));
+  if (by.walk && by.walk.minutes <= 30) return { mode: "walk", reason: `It's a short walk (${by.walk.minutes} min).` };
+  // Transit wins unless it's much slower: driving time ignores traffic and parking.
+  if (by.transit && (!by.drive || by.transit.minutes <= Math.max(by.drive.minutes * 2, by.drive.minutes + 25))) {
+    return { mode: "transit", reason: `Public transit takes ${by.transit.minutes} min (${by.transit.lines.join(" → ")}), no parking needed.` };
+  }
+  if (by.drive) return { mode: "drive", reason: `Driving or a taxi takes ${by.drive.minutes} min, much faster than the alternatives.` };
+  if (by.bike) return { mode: "bike", reason: `Cycling takes ${by.bike.minutes} min.` };
+  return { mode: null, reason: "No route found for any mode." };
+}
+
+export async function compareRoutes(
+  { from_latitude, from_longitude, to_latitude, to_longitude, from_name, to_name, modes = ROUTE_MODES },
+  { signal } = {},
+) {
+  const from = { name: from_name ?? "Start", latitude: from_latitude, longitude: from_longitude };
+  const to = { name: to_name ?? "Destination", latitude: to_latitude, longitude: to_longitude };
+  const straightKm = Math.round(haversineKm(from_latitude, from_longitude, to_latitude, to_longitude) * 10) / 10;
+  const wanted = ROUTE_MODES.filter((m) => modes.includes(m));
+
+  const options = await Promise.all(
+    wanted.map(async (mode) => {
+      if (straightKm > MAX_KM[mode]) return { mode, minutes: null, error: `Too far to ${mode === "bike" ? "cycle" : mode}.` };
+      try {
+        return await (mode === "transit" ? transitRoute(from, to, signal) : osrmRoute(mode, from, to, signal));
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        return { mode, minutes: null, error: err.message };
+      }
+    }),
+  );
+  if (options.every((o) => o.minutes == null)) {
+    throw new ToolError(`No routes found between ${from.name} and ${to.name}.`, { retryable: true });
+  }
+
+  const recommended = recommendMode(options);
+  const compact = options.map(({ geometry, ...o }) => o);
+  if (options.some((o) => o.mode === "drive" && o.minutes != null)) {
+    compact.find((o) => o.mode === "drive").note = "Driving time excludes traffic and parking.";
+  }
+  return {
+    result: { from: from.name, to: to.name, straight_line_km: straightKm, options: compact, recommended },
+    ui: { kind: "routes", from, to, straight_line_km: straightKm, options, recommended },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // get_exchange_rate: Frankfurter (European Central Bank reference rates)
 // ---------------------------------------------------------------------------
 export async function getExchangeRate({ from, to, amount = 1 }, { signal } = {}) {

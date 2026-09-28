@@ -6,9 +6,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
+    "start:go": "npm run build:go && MCP_SERVER=go node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
     "mcp": "node src/mcp/server.js",
+    "build:go": "cd mcp-go && go build -o bin/wanderly-mcp .",
     "test": "node --test \"test/*.test.js\"",
+    "test:go": "cd mcp-go && go vet ./... && go test ./...",
     "eval": "node --env-file-if-exists=.env scripts/eval.js"
   },
   "engines": {
