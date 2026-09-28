@@ -1,5 +1,5 @@
 {
-  "name": "wanderly",
+  "name": "wanderly-ai-travel-agent",
   "version": "1.0.0",
   "description": "A ReAct travel-planning agent with an MCP tool server, a pluggable LLM (Claude, DeepSeek, any OpenAI-compatible API) and free, no-key travel APIs.",
   "type": "module",

@@ -1,4 +1,4 @@
-# 🧭 Wanderly: a ReAct travel agent
+# 🧭 Wanderly - AI Travel Agent
 
 Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
 
@@ -15,8 +15,8 @@ Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel A
 Requires **Node.js 22.9+**.
 
 ```bash
-git clone https://github.com/axlezhao/Wanderly.git
-cd Wanderly
+git clone https://github.com/axlezhao/Wanderly-AI-Travel-Agent.git
+cd Wanderly-AI-Travel-Agent
 npm install
 npm start
 ```
@@ -97,7 +97,7 @@ A policy is anything with `decide()` and `observe()`, so adding a new brain does
   "mcpServers": {
     "travel-tools": {
       "command": "node",
-      "args": ["/absolute/path/to/Wanderly/src/mcp/server.js"]
+      "args": ["/absolute/path/to/Wanderly-AI-Travel-Agent/src/mcp/server.js"]
     }
   }
 }

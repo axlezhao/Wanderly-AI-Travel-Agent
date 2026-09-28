@@ -6,7 +6,7 @@
 //   ui     -> richer data the browser uses to draw the map and trip panel
 // and throws ToolError on failure (retryable=true for transient network errors).
 
-const USER_AGENT = "Wanderly/1.0 (https://github.com/axlezhao/Wanderly)";
+const USER_AGENT = "Wanderly/1.0 (https://github.com/axlezhao/Wanderly-AI-Travel-Agent)";
 
 export class ToolError extends Error {
   constructor(message, { retryable = false } = {}) {
