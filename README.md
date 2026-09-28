@@ -67,9 +67,11 @@ The model only decides *what to do next*. [`src/harness/harness.js`](src/harness
 
 | Guarantee | Why |
 |---|---|
-| **Step limit** (`MAX_STEPS`, default 8), last step forces an answer | no infinite loops; you always get *something* |
+| **Step limit** (`MAX_STEPS`, default 6), last step forces an answer | no infinite loops; you always get *something* |
 | **Parallel actions** within a step | weather + sights + restaurants at once |
-| **Per-tool timeout** (60 s) and **retries with backoff** for transient errors (429, 5xx, timeouts) | free public APIs are flaky |
+| **Per-tool timeout** (60 s); every failed lookup is **tried a second time** (temporary errors like 429/5xx/timeouts up to 3 times) | free public APIs are flaky |
+| **LLM fallback**: if a lookup still fails, the model fills that part from its own knowledge, labeled "(general knowledge, not live data)" | you still get a complete plan, and you know what isn't live data |
+| **Circuit breaker**: a tool that fails twice in one request is skipped after that | no waiting on a service that's down |
 | **Real cancellation**: Stop button → HTTP request → harness → MCP `cancelled` → `fetch` aborted | no zombie requests hogging rate limits |
 | **Caching**: per-session in the harness, 15 min shared in the MCP server | fewer API calls, instant repeats |
 | **Observation truncation** (12k chars) | one huge result can't flood the context |

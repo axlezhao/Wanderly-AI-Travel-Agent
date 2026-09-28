@@ -104,16 +104,55 @@ test("retries transient failures with backoff, then succeeds", async () => {
   assert.equal(events.filter((e) => e.type === "retry").length, 2);
 });
 
-test("does not retry permanent errors and passes them to the policy as observations", async () => {
+test("tries a failed lookup a second time, then hands the gap to the model's own knowledge", async () => {
   const toolbox = fakeToolbox({ a: async () => ({ text: "Error: no such place", ui: null, isError: true, retryable: false }) });
   const harness = new ReActHarness({ toolbox, retryBaseDelayMs: 1 });
   const policy = scripted([act("a"), { answer: "sorry" }]);
-  const { end } = await run(harness, policy);
+  const { end, events } = await run(harness, policy);
 
-  assert.equal(toolbox.calls.length, 1);
-  assert.equal(policy.seen.observations[0].isError, true);
-  assert.match(policy.seen.observations[0].content, /no such place/);
+  assert.equal(toolbox.calls.length, 2, "one retry for a non-transient failure");
+  const obs = policy.seen.observations[0];
+  assert.equal(obs.isError, true);
+  assert.match(obs.content, /no such place/);
+  assert.match(obs.content, /general knowledge/, "the model is told to fall back on its own knowledge");
+  assert.equal(events.find((e) => e.type === "observation").fallback, true);
   assert.equal(end.toolErrors, 1);
+  assert.equal(end.fallbacks, 1);
+});
+
+test("a second try that succeeds is a normal observation", async () => {
+  const toolbox = fakeToolbox({
+    a: async (_i, n) => (n === 1 ? { text: "Error: not found", ui: null, isError: true, retryable: false } : ok('{"ok":1}')),
+  });
+  const harness = new ReActHarness({ toolbox, retryBaseDelayMs: 1 });
+  const policy = scripted([act("a"), { answer: "done" }]);
+  const { end } = await run(harness, policy);
+  assert.equal(policy.seen.observations[0].isError, false);
+  assert.equal(end.fallbacks, 0);
+});
+
+test("does not retry invalid input: only the model can fix its arguments", async () => {
+  const toolbox = fakeToolbox({
+    a: async () => ({ text: "MCP error -32602: Input validation error: latitude must be a number", ui: null, isError: true, retryable: false }),
+  });
+  const harness = new ReActHarness({ toolbox, retryBaseDelayMs: 1 });
+  const policy = scripted([act("a"), { answer: "ok" }]);
+  await run(harness, policy);
+  assert.equal(toolbox.calls.length, 1);
+  assert.doesNotMatch(policy.seen.observations[0].content, /general knowledge/);
+});
+
+test("circuit breaker: a tool that keeps failing is skipped for the rest of the run", async () => {
+  const toolbox = fakeToolbox({ a: async () => ({ text: "Error: overloaded", ui: null, isError: true, retryable: false }) });
+  const harness = new ReActHarness({ toolbox, retryBaseDelayMs: 1 });
+  const call = (q) => ({ thought: "", actions: [{ id: q, tool: "a", input: { q } }] });
+  const policy = scripted([call("1"), call("2"), call("3"), { answer: "done" }]);
+  const { events } = await run(harness, policy);
+
+  assert.equal(toolbox.calls.length, 4, "two failed calls (each tried twice), then no more");
+  const third = events.filter((e) => e.type === "observation")[2];
+  assert.equal(third.skipped, true);
+  assert.match(policy.seen.observations[2].content, /skipped/);
 });
 
 test("treats thrown transport errors (e.g. MCP timeouts) as retryable", async () => {
@@ -144,11 +183,11 @@ test("caches identical calls within a session (key order doesn't matter)", async
 
 test("never caches errors", async () => {
   const toolbox = fakeToolbox({ a: async () => ({ text: "Error: x", ui: null, isError: true, retryable: false }) });
-  const harness = new ReActHarness({ toolbox });
+  const harness = new ReActHarness({ toolbox, retryBaseDelayMs: 1 });
   const cache = new Map();
   await run(harness, scripted([act("a"), { answer: "1" }]), { cache });
   await run(harness, scripted([act("a"), { answer: "2" }]), { cache });
-  assert.equal(toolbox.calls.length, 2);
+  assert.equal(toolbox.calls.length, 4, "each run tries twice; the failure is not served from cache");
 });
 
 test("truncates huge observations before they reach the model", async () => {

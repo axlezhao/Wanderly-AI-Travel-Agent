@@ -5,7 +5,12 @@
 // rule-based demo planner, a scripted test policy) gets the same guarantees:
 //   - a hard step limit, with one last forced-answer step instead of a dead end
 //   - parallel actions within a step
-//   - per-tool timeouts and retries with backoff for transient failures
+//   - per-tool timeouts; every failed lookup is tried a second time
+//     (transient errors like 429/5xx/timeouts up to maxRetries more times)
+//   - LLM fallback: when a lookup still fails, the observation tells the model
+//     to fill that gap from its own knowledge, labeled as such
+//   - a circuit breaker: a tool that keeps failing is skipped for the rest of
+//     the run instead of burning time on it
 //   - a per-session cache so repeated identical calls don't hit the APIs again
 //   - observation truncation so one huge result can't flood the context
 //   - cancellation (client disconnects -> in-flight work stops)
@@ -21,12 +26,21 @@
 import { describeAction, summarizeObservation } from "./labels.js";
 
 export const DEFAULTS = {
-  maxSteps: 8,
+  maxSteps: 6,
   toolTimeoutMs: 60000,
   maxRetries: 2,
   retryBaseDelayMs: 600,
   maxObservationChars: 12000,
+  // After this many failed calls to the same tool in one run, skip it.
+  circuitBreakAfter: 2,
 };
+
+// Retrying the identical call can't fix bad arguments; the model has to change them.
+const INVALID_INPUT = /input validation error|validating "arguments"|invalid arguments/i;
+
+const FALLBACK_HINT =
+  "\n\n[Harness] This lookup failed even after a retry. Don't call it again. " +
+  "Fill this part from your own general knowledge, and label it briefly as general knowledge (not live data).";
 
 export class StepLimitError extends Error {}
 
@@ -50,7 +64,8 @@ export class ReActHarness {
     const { maxSteps } = this.options;
     const startedAt = Date.now();
     const trace = this.tracer?.start(runId, { policy: policy.name, ...meta });
-    const stats = { steps: 0, toolCalls: 0, toolErrors: 0, cacheHits: 0, retries: 0 };
+    const stats = { steps: 0, toolCalls: 0, toolErrors: 0, cacheHits: 0, retries: 0, fallbacks: 0 };
+    const failures = new Map(); // tool name -> failed calls this run (circuit breaker)
 
     const emit = (event) => {
       const e = { ...event, runId, t: Date.now() - startedAt };
@@ -90,7 +105,7 @@ export class ReActHarness {
         if (actions.length === 0) continue; // e.g. the model paused mid-turn; just ask it again
 
         const observations = await Promise.all(
-          actions.map((action) => this.#act(action, { step, emit, signal, cache, stats })),
+          actions.map((action) => this.#act(action, { step, emit, signal, cache, stats, failures })),
         );
         policy.observe(observations);
       }
@@ -108,20 +123,24 @@ export class ReActHarness {
   }
 
   // Execute one Action and turn the outcome into an Observation.
-  async #act(action, { step, emit, signal, cache, stats }) {
+  async #act(action, { step, emit, signal, cache, stats, failures }) {
     const { id, tool, input } = action;
-    const { toolTimeoutMs, maxRetries, retryBaseDelayMs, maxObservationChars } = this.options;
+    const { toolTimeoutMs, maxRetries, retryBaseDelayMs, maxObservationChars, circuitBreakAfter } = this.options;
     emit({ type: "action", step, id, tool, input, label: describeAction(tool, input) });
     stats.toolCalls++;
 
     const key = `${tool}:${stableStringify(input)}`;
     const started = Date.now();
-    let outcome, attempts = 0, cached = false;
+    let outcome, attempts = 0, cached = false, skipped = false;
 
     if (cache.has(key)) {
       outcome = cache.get(key);
       cached = true;
       stats.cacheHits++;
+    } else if ((failures.get(tool) ?? 0) >= circuitBreakAfter) {
+      // This tool keeps failing this run: don't wait on it again.
+      skipped = true;
+      outcome = { text: `Error: ${tool} is unavailable right now (it failed repeatedly), so it was skipped.`, ui: null, isError: true, retryable: false };
     } else {
       while (true) {
         attempts++;
@@ -132,16 +151,29 @@ export class ReActHarness {
           // Transport-level failure (timeout, server crash): treat as transient.
           outcome = { text: `Error: ${err.message}`, ui: null, isError: true, retryable: true };
         }
-        if (!(outcome.isError && outcome.retryable) || attempts > maxRetries) break;
+        if (!outcome.isError) break;
+        // Transient errors get up to maxRetries more tries; any other failure gets one second try,
+        // except bad input, which only the model can fix.
+        const retriesAllowed = outcome.retryable ? maxRetries : INVALID_INPUT.test(outcome.text) ? 0 : 1;
+        if (attempts > retriesAllowed) break;
         stats.retries++;
         emit({ type: "retry", step, id, tool, attempt: attempts + 1, reason: outcome.text });
         await sleep(retryBaseDelayMs * 2 ** (attempts - 1), signal);
       }
       if (!outcome.isError) cache.set(key, outcome);
     }
-    if (outcome.isError) stats.toolErrors++;
-
-    const content = truncate(outcome.text, maxObservationChars);
+    let content = truncate(outcome.text, maxObservationChars);
+    let fallback = false;
+    if (outcome.isError) {
+      stats.toolErrors++;
+      failures.set(tool, (failures.get(tool) ?? 0) + 1);
+      // Out of retries: hand this part over to the model's own knowledge.
+      if (!INVALID_INPUT.test(outcome.text)) {
+        fallback = true;
+        stats.fallbacks++;
+        content += FALLBACK_HINT;
+      }
+    }
     emit({
       type: "observation",
       step,
@@ -151,6 +183,8 @@ export class ReActHarness {
       summary: summarizeObservation(tool, outcome),
       ui: outcome.ui,
       cached,
+      skipped,
+      fallback,
       attempts,
       durationMs: Date.now() - started,
       chars: outcome.text.length,

@@ -26,7 +26,7 @@ const toolbox = new McpToolbox();
 const harness = new ReActHarness({
   toolbox,
   tracer: new JsonlTracer(path.join(here, "traces")),
-  maxSteps: Number(process.env.MAX_STEPS) || 8,
+  ...(process.env.MAX_STEPS && { maxSteps: Number(process.env.MAX_STEPS) }), // default 6
 });
 
 const models = new ModelRegistry(path.join(here, "models.local.json"));

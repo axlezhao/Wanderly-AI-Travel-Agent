@@ -349,6 +349,12 @@ function createTurn() {
           a.obs.replaceChildren(el("span", "obs-label", "Observation"), document.createTextNode(e.summary));
           if (!e.ok) a.row.classList.add("error");
           if (e.cached) a.tags.append(el("span", "tag", "cached"));
+          if (e.skipped) a.tags.append(el("span", "tag warn", "skipped"));
+          if (e.fallback) {
+            const t = el("span", "tag warn", "→ AI knowledge");
+            t.title = "The lookup failed twice, so the agent fills this part from its own knowledge.";
+            a.tags.append(t);
+          }
           if (e.attempts > 1) a.tags.append(el("span", "tag warn", `${e.attempts} tries`));
           a.tags.append(el("span", "tag", e.durationMs < 1000 ? `${e.durationMs} ms` : `${(e.durationMs / 1000).toFixed(1)} s`));
           if (e.ok && e.ui && board[e.ui.kind]) {
@@ -384,6 +390,7 @@ function createTurn() {
           ];
           if (e.retries) bits.push(`${e.retries} retr${e.retries === 1 ? "y" : "ies"}`);
           if (e.cacheHits) bits.push(`${e.cacheHits} cached`);
+          if (e.fallbacks) bits.push(`${e.fallbacks} filled from AI knowledge`);
           if (e.usage) bits.push(`${e.usage.input_tokens.toLocaleString()} in / ${e.usage.output_tokens.toLocaleString()} out tokens`);
           $(".trace-meta", node).textContent = bits.slice(0, 3).join(" · ");
           $(".run-stats", node).textContent = `${e.status === "ok" ? "" : e.status + " · "}${bits.join(" · ")} · ${e.runId}`;

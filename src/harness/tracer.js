@@ -28,7 +28,7 @@ export class JsonlTracer {
         const u = summary.usage;
         console.log(
           `[run ${runId}] ${summary.status} · ${summary.steps} steps · ${summary.toolCalls} tool calls` +
-            ` (${summary.cacheHits} cached, ${summary.retries} retries, ${summary.toolErrors} errors)` +
+            ` (${summary.cacheHits} cached, ${summary.retries} retries, ${summary.toolErrors} errors, ${summary.fallbacks ?? 0} fallbacks)` +
             ` · ${(summary.durationMs / 1000).toFixed(1)}s` +
             (u ? ` · ${u.input_tokens} in / ${u.output_tokens} out tokens` : "") +
             ` · ${file}`,
