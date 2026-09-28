@@ -300,6 +300,14 @@ function createTurn() {
           frame ||= requestAnimationFrame(flushDraft);
           break;
 
+        case "model_retry": {
+          // The model request failed for a temporary reason; the harness is re-sending it.
+          const s = stepFor(e.step);
+          const note = el("div", "retry-note", `⟳ Model request failed (${e.reason}), retrying in ${Math.round(e.waitMs / 100) / 10} s (attempt ${e.attempt} of ${e.maxAttempts})…`);
+          s.acts.before(note);
+          break;
+        }
+
         case "draft_reset":
           cancelDraft();
           answerEl.replaceChildren();
@@ -389,6 +397,7 @@ function createTurn() {
             `${(e.durationMs / 1000).toFixed(1)} s`,
           ];
           if (e.retries) bits.push(`${e.retries} retr${e.retries === 1 ? "y" : "ies"}`);
+          if (e.modelRetries) bits.push(`${e.modelRetries} model retr${e.modelRetries === 1 ? "y" : "ies"}`);
           if (e.cacheHits) bits.push(`${e.cacheHits} cached`);
           if (e.fallbacks) bits.push(`${e.fallbacks} filled from AI knowledge`);
           if (e.usage) bits.push(`${e.usage.input_tokens.toLocaleString()} in / ${e.usage.output_tokens.toLocaleString()} out tokens`);

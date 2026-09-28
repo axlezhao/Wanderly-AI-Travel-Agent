@@ -8,6 +8,7 @@
 //   Answer      = an assistant message with no tool calls
 
 import { systemPrompt } from "./prompt.js";
+import { ModelError, parseRetryAfter } from "../harness/model-errors.js";
 
 export class OpenAICompatiblePolicy {
   name = "openai-compatible";
@@ -73,55 +74,89 @@ export class OpenAICompatiblePolicy {
     }
   }
 
+  // One model request. Failures throw ModelError; the harness decides whether to retry.
+  // Nothing is added to this.messages until a response arrives complete, so a retry
+  // re-sends exactly the same conversation.
   async #callModel({ forceAnswer, emit, signal }) {
-    const res = await fetch(this.url, {
-      method: "POST",
-      signal,
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages: this.messages,
-        tools: this.tools,
-        tool_choice: forceAnswer ? "none" : "auto",
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    });
+    const host = new URL(this.url).host;
+    let res;
+    try {
+      res = await fetch(this.url, {
+        method: "POST",
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: this.messages,
+          tools: this.tools,
+          tool_choice: forceAnswer ? "none" : "auto",
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw new ModelError(`Couldn't reach ${host}: ${err.cause?.code ?? err.message}`, { retryable: true });
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`${new URL(this.url).host} returned ${res.status}: ${body.slice(0, 300)}`);
+      throw new ModelError(`${host} returned ${res.status}: ${body.slice(0, 300)}`, {
+        status: res.status,
+        retryAfterMs: parseRetryAfter(res.headers.get("retry-after")),
+      });
     }
 
-    let content = "", reasoning = "", finishReason = null;
+    let content = "", reasoning = "", finishReason = null, done = false;
     const calls = []; // tool calls stream in fragments, keyed by index
+    const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
 
-    for await (const data of sseEvents(res.body)) {
-      if (data === "[DONE]") break;
-      const chunk = JSON.parse(data);
-      if (chunk.usage) {
-        this.usage.input_tokens += chunk.usage.prompt_tokens ?? 0;
-        this.usage.output_tokens += chunk.usage.completion_tokens ?? 0;
-        this.usage.cache_read_input_tokens += chunk.usage.prompt_cache_hit_tokens ?? chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+    try {
+      for await (const data of sseEvents(res.body)) {
+        if (data === "[DONE]") {
+          done = true;
+          break;
+        }
+        const chunk = JSON.parse(data);
+        // Some providers report failures inside the stream.
+        if (chunk.error) {
+          throw new ModelError(`${host} stream error: ${chunk.error.message ?? JSON.stringify(chunk.error)}`, { retryable: true });
+        }
+        if (chunk.usage) {
+          usage.input_tokens += chunk.usage.prompt_tokens ?? 0;
+          usage.output_tokens += chunk.usage.completion_tokens ?? 0;
+          usage.cache_read_input_tokens += chunk.usage.prompt_cache_hit_tokens ?? chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        }
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta ?? {};
+        if (delta.reasoning_content) reasoning += delta.reasoning_content;
+        if (delta.content) {
+          content += delta.content;
+          emit({ type: "draft_delta", text: delta.content });
+        }
+        for (const tc of delta.tool_calls ?? []) {
+          const slot = (calls[tc.index ?? calls.length] ??= { id: "", type: "function", function: { name: "", arguments: "" } });
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name) slot.function.name += tc.function.name;
+          if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+        }
+        if (choice.finish_reason) finishReason = choice.finish_reason;
       }
-      const choice = chunk.choices?.[0];
-      if (!choice) continue;
-      const delta = choice.delta ?? {};
-      if (delta.reasoning_content) reasoning += delta.reasoning_content;
-      if (delta.content) {
-        content += delta.content;
-        emit({ type: "draft_delta", text: delta.content });
-      }
-      for (const tc of delta.tool_calls ?? []) {
-        const slot = (calls[tc.index ?? calls.length] ??= { id: "", type: "function", function: { name: "", arguments: "" } });
-        if (tc.id) slot.id = tc.id;
-        if (tc.function?.name) slot.function.name += tc.function.name;
-        if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
-      }
-      if (choice.finish_reason) finishReason = choice.finish_reason;
+    } catch (err) {
+      if (signal?.aborted || err instanceof ModelError) throw err;
+      // The connection dropped or sent garbage mid-response.
+      throw new ModelError(`${host} stream broke off: ${err.message}`, { retryable: true });
     }
+    // A response that ends without [DONE] or a finish reason was cut off.
+    if (!done && !finishReason) throw new ModelError(`${host} stream ended early`, { retryable: true });
+
+    // Count tokens only for completed requests (a retried request is counted once it succeeds).
+    this.usage.input_tokens += usage.input_tokens;
+    this.usage.output_tokens += usage.output_tokens;
+    this.usage.cache_read_input_tokens += usage.cache_read_input_tokens;
 
     const toolCalls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || `call_${Date.now()}_${i}` }));
     return { content, reasoning, toolCalls, finishReason };

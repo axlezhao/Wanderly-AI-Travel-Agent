@@ -28,7 +28,8 @@ export class ClaudePolicy {
    * @param {string} [p.baseUrl] defaults to the Anthropic API
    */
   constructor({ tools, model, apiKey, baseUrl, effort = process.env.CLAUDE_EFFORT || "medium", client }) {
-    this.client = client ?? new Anthropic({ ...(apiKey && { apiKey }), ...(baseUrl && { baseURL: baseUrl }) });
+    // maxRetries: 0 — the harness retries model requests the same way for every provider.
+    this.client = client ?? new Anthropic({ maxRetries: 0, ...(apiKey && { apiKey }), ...(baseUrl && { baseURL: baseUrl }) });
     this.model = model;
     this.effort = effort;
     this.modern = MODERN.test(model);

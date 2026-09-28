@@ -8,6 +8,7 @@ import http from "node:http";
 import { parseRequest } from "../src/policies/demo.js";
 import { OpenAICompatiblePolicy } from "../src/policies/openai-compatible.js";
 import { normalize } from "../src/models/registry.js";
+import { ModelError } from "../src/harness/model-errors.js";
 
 test("demo parser extracts destination and trip length", () => {
   const cases = [
@@ -118,4 +119,46 @@ test("OpenAI-compatible policy: closes out tool calls left open by a cancelled r
   policy.addUserMessage("next question");
   assert.deepEqual(policy.messages.slice(-2).map((m) => m.role), ["tool", "user"]);
   assert.equal(policy.messages.at(-2).tool_call_id, "c1");
+});
+
+// A server that answers every request with a fixed HTTP status, or drops the stream midway.
+async function failingServer(handler) {
+  const server = http.createServer(handler);
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}/v1`, close: () => server.close() };
+}
+
+test("OpenAI-compatible policy: failures become ModelErrors and leave the conversation untouched", async () => {
+  const cases = [
+    [(req, res) => { res.writeHead(503, { "retry-after": "3" }); res.end("busy"); }, { status: 503, retryable: true, retryAfterMs: 3000 }],
+    [(req, res) => { res.writeHead(401); res.end("bad key"); }, { status: 401, retryable: false }],
+    // The stream starts, then the connection ends without a finish reason.
+    [(req, res) => { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(`data: ${JSON.stringify(delta({ content: "Thought: half" }))}\n\n`); }, { retryable: true, message: /ended early/ }],
+    [(req, res) => { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(`data: ${JSON.stringify({ error: { message: "upstream overloaded" } })}\n\n`); }, { retryable: true, message: /upstream overloaded/ }],
+  ];
+  for (const [handler, expected] of cases) {
+    const server = await failingServer(handler);
+    try {
+      const policy = new OpenAICompatiblePolicy({ tools: TOOLS, baseUrl: server.url, model: "m" });
+      policy.addUserMessage("hi");
+      const before = policy.messages.length;
+      await assert.rejects(policy.decide({ emit: () => {}, forceAnswer: false }), (err) => {
+        assert.ok(err instanceof ModelError);
+        assert.equal(err.retryable, expected.retryable);
+        if (expected.status) assert.equal(err.status, expected.status);
+        if (expected.retryAfterMs) assert.equal(err.retryAfterMs, expected.retryAfterMs);
+        if (expected.message) assert.match(err.message, expected.message);
+        return true;
+      });
+      assert.equal(policy.messages.length, before, "nothing is recorded, so a retry re-sends the same request");
+    } finally {
+      server.close();
+    }
+  }
+});
+
+test("OpenAI-compatible policy: an unreachable server is a retryable ModelError", async () => {
+  const policy = new OpenAICompatiblePolicy({ tools: TOOLS, baseUrl: "http://127.0.0.1:9/v1", model: "m" });
+  policy.addUserMessage("hi");
+  await assert.rejects(policy.decide({ emit: () => {}, forceAnswer: false }), (err) => err instanceof ModelError && err.retryable);
 });

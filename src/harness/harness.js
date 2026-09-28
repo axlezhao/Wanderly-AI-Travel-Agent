@@ -4,6 +4,8 @@
 // The harness owns everything around the model so any "brain" (Claude, the
 // rule-based demo planner, a scripted test policy) gets the same guarantees:
 //   - a hard step limit, with one last forced-answer step instead of a dead end
+//   - model retries: a model request that fails for a temporary reason (rate
+//     limit, overload, network drop) is re-sent with backoff, for every provider
 //   - parallel actions within a step
 //   - per-tool timeouts; every failed lookup is tried a second time
 //     (transient errors like 429/5xx/timeouts up to maxRetries more times)
@@ -24,6 +26,7 @@
 //   usage?  optional { input_tokens, output_tokens, ... } running totals
 
 import { describeAction, summarizeObservation } from "./labels.js";
+import { classifyModelError } from "./model-errors.js";
 
 export const DEFAULTS = {
   maxSteps: 6,
@@ -33,6 +36,11 @@ export const DEFAULTS = {
   maxObservationChars: 12000,
   // After this many failed calls to the same tool in one run, skip it.
   circuitBreakAfter: 2,
+  // Model requests: retries for temporary failures, exponential backoff, and a cap on
+  // how long to wait (a provider's Retry-After header is honored up to the cap).
+  modelRetries: 2,
+  modelRetryBaseDelayMs: 1000,
+  modelRetryMaxDelayMs: 20000,
 };
 
 // Retrying the identical call can't fix bad arguments; the model has to change them.
@@ -64,7 +72,7 @@ export class ReActHarness {
     const { maxSteps } = this.options;
     const startedAt = Date.now();
     const trace = this.tracer?.start(runId, { policy: policy.name, ...meta });
-    const stats = { steps: 0, toolCalls: 0, toolErrors: 0, cacheHits: 0, retries: 0, fallbacks: 0 };
+    const stats = { steps: 0, toolCalls: 0, toolErrors: 0, cacheHits: 0, retries: 0, fallbacks: 0, modelRetries: 0 };
     const failures = new Map(); // tool name -> failed calls this run (circuit breaker)
 
     const emit = (event) => {
@@ -84,14 +92,14 @@ export class ReActHarness {
         const forceAnswer = step === maxSteps;
         emit({ type: "step_start", step, forceAnswer });
 
-        const decision = await policy.decide({
+        const decision = await this.#decide(policy, {
           step,
           maxSteps,
           forceAnswer,
           signal,
           // Policies may stream text while they think; we don't yet know if it's a Thought or the Answer.
           emit: (e) => emit({ ...e, step }),
-        });
+        }, stats);
 
         if (decision.answer !== undefined) {
           if (decision.thought) emit({ type: "thought", step, text: decision.thought });
@@ -120,6 +128,27 @@ export class ReActHarness {
       trace?.end(summary);
     }
     return { answer, status };
+  }
+
+  // Ask the policy for its next move, re-sending the model request if it fails for a
+  // temporary reason. Policies only record a model reply once it arrives complete,
+  // so a retry sends exactly the same conversation again.
+  async #decide(policy, args, stats) {
+    const { modelRetries, modelRetryBaseDelayMs, modelRetryMaxDelayMs } = this.options;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await policy.decide(args);
+      } catch (err) {
+        if (args.signal?.aborted) throw err;
+        const { retryable, retryAfterMs, reason } = classifyModelError(err);
+        if (!retryable || attempt > modelRetries) throw err;
+        const waitMs = Math.min(retryAfterMs ?? modelRetryBaseDelayMs * 2 ** (attempt - 1), modelRetryMaxDelayMs);
+        stats.modelRetries++;
+        args.emit({ type: "draft_reset" }); // discard any half-streamed text
+        args.emit({ type: "model_retry", attempt: attempt + 1, maxAttempts: modelRetries + 1, reason, waitMs });
+        await sleep(waitMs, args.signal);
+      }
+    }
   }
 
   // Execute one Action and turn the outcome into an Observation.

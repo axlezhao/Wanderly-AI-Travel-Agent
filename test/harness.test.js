@@ -223,3 +223,59 @@ test("a policy exception becomes an error event, not a crash", async () => {
   assert.equal(status, "error");
   assert.equal(events.find((e) => e.type === "error").message, "model API down");
 });
+
+// ---- model request retries (all providers) ----
+
+const flaky = (failures, error) => {
+  let calls = 0;
+  return {
+    name: "flaky",
+    get calls() { return calls; },
+    async decide() {
+      calls++;
+      if (calls <= failures) throw error();
+      return { answer: "made it" };
+    },
+    observe() {},
+  };
+};
+
+test("re-sends a model request that failed for a temporary reason", async () => {
+  const harness = new ReActHarness({ toolbox: fakeToolbox({}), modelRetryBaseDelayMs: 1 });
+  const policy = flaky(2, () => Object.assign(new Error("Overloaded"), { status: 529 }));
+  const { status, answer, events, end } = await run(harness, policy);
+
+  assert.equal(status, "ok");
+  assert.equal(answer, "made it");
+  assert.equal(policy.calls, 3);
+  assert.equal(end.modelRetries, 2);
+  const retries = events.filter((e) => e.type === "model_retry");
+  assert.deepEqual(retries.map((e) => e.attempt), [2, 3]);
+  assert.match(retries[0].reason, /529 overloaded/);
+  assert.ok(events.some((e) => e.type === "draft_reset"), "half-streamed text is discarded before retrying");
+});
+
+test("gives up after the retry budget", async () => {
+  const harness = new ReActHarness({ toolbox: fakeToolbox({}), modelRetryBaseDelayMs: 1, modelRetries: 2 });
+  const policy = flaky(99, () => Object.assign(new Error("rate limited"), { status: 429 }));
+  const { status } = await run(harness, policy);
+  assert.equal(status, "error");
+  assert.equal(policy.calls, 3, "1 try + 2 retries");
+});
+
+test("does not retry errors that can't succeed (bad key, bad request)", async () => {
+  for (const status of [400, 401, 403, 404]) {
+    const harness = new ReActHarness({ toolbox: fakeToolbox({}), modelRetryBaseDelayMs: 1 });
+    const policy = flaky(99, () => Object.assign(new Error("nope"), { status }));
+    await run(harness, policy);
+    assert.equal(policy.calls, 1, `status ${status} fails fast`);
+  }
+});
+
+test("honors Retry-After, capped", async () => {
+  const harness = new ReActHarness({ toolbox: fakeToolbox({}), modelRetryMaxDelayMs: 5 });
+  const headers = new Headers({ "retry-after": "30" });
+  const policy = flaky(1, () => Object.assign(new Error("slow down"), { status: 429, headers }));
+  const { events } = await run(harness, policy);
+  assert.equal(events.find((e) => e.type === "model_retry").waitMs, 5, "30 s requested, capped at 5 ms");
+});
