@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wanderly · Travel Agent</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🧭</span>
+      <span class="brand-name">Wanderly</span>
+      <span class="brand-tag">ReAct travel agent</span>
+    </div>
+    <div class="topbar-actions">
+      <label class="model-picker">
+        <span class="visually-hidden">Model</span>
+        <select id="model-select" aria-label="Model"></select>
+      </label>
+      <button id="open-models" class="ghost" title="Add or manage models">⚙︎ Models</button>
+      <button id="new-trip" class="ghost">New trip</button>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="Views">
+    <button data-view="chat" aria-selected="true">Chat</button>
+    <button data-view="board" aria-selected="false">Trip board</button>
+  </nav>
+
+  <main class="layout" data-view="chat">
+    <section class="chat" aria-label="Conversation">
+      <div id="messages" class="messages">
+        <div id="empty" class="empty">
+          <h1>Where to next?</h1>
+          <p>Tell me a destination and how long you have. I'll reason step by step, call real travel tools over MCP, and build you a day-by-day plan.</p>
+          <div class="suggestions">
+            <button>Plan 3 days in Kyoto</button>
+            <button>A food-focused weekend in Lisbon</button>
+            <button>4 days in Mexico City</button>
+            <button>5 days in Seoul next month</button>
+          </div>
+        </div>
+      </div>
+      <form id="composer" class="composer">
+        <textarea id="input" rows="1" placeholder="e.g. 4 days in Barcelona, I love architecture and tapas" aria-label="Message"></textarea>
+        <button id="send" type="submit" class="primary" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+        </button>
+      </form>
+    </section>
+
+    <aside class="board" aria-label="Trip board">
+      <div id="map" class="map"></div>
+      <div class="board-body">
+        <div id="board-empty" class="board-empty">
+          <p>Your trip board fills in as the agent works: the destination, weather, top sights and places to eat, all pinned on the map.</p>
+          <div id="tools" class="tools"></div>
+        </div>
+        <section id="guide" class="card" hidden></section>
+        <section id="weather" class="card" hidden>
+          <h2>Weather <span class="sub" id="weather-src"></span></h2>
+          <div class="weather-strip" id="weather-days"></div>
+        </section>
+        <section id="sights" class="card" hidden>
+          <h2>Top sights <span class="sub">ranked by Wikipedia readership</span></h2>
+          <div class="sight-grid" id="sight-grid"></div>
+        </section>
+        <section id="food" class="card" hidden>
+          <h2>Eat &amp; drink <span class="sub">from OpenStreetMap</span></h2>
+          <ul class="place-list" id="place-list"></ul>
+        </section>
+        <section id="money" class="card" hidden></section>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="models-dialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h2>Models</h2>
+      <button class="icon-btn" aria-label="Close">✕</button>
+    </form>
+    <p class="dialog-note">The agent's "brain" is swappable: every model runs through the same ReAct harness and MCP tools.
+      Keys are stored only on this computer (<code>models.local.json</code>, git-ignored) and are never sent to the browser.</p>
+
+    <h3>Configured</h3>
+    <ul id="model-list" class="model-list"></ul>
+
+    <h3>Add a model</h3>
+    <form id="add-model" class="add-model" autocomplete="off">
+      <label>Preset
+        <select name="preset" id="preset"></select>
+      </label>
+      <label>Provider
+        <select name="provider" id="provider">
+          <option value="openai-compatible">OpenAI-compatible (DeepSeek, OpenAI, Groq, Ollama…)</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+        </select>
+      </label>
+      <label class="wide">Base URL
+        <input name="baseUrl" id="baseUrl" placeholder="https://api.example.com/v1" />
+      </label>
+      <label class="wide">API key <a id="key-link" target="_blank" rel="noopener" hidden>get a key ↗</a>
+        <input name="apiKey" id="apiKey" type="password" placeholder="sk-…" spellcheck="false" />
+      </label>
+      <label>Model
+        <input name="model" id="model" list="model-options" placeholder="model name" spellcheck="false" />
+        <datalist id="model-options"></datalist>
+      </label>
+      <label>Display name
+        <input name="label" id="label" placeholder="optional" />
+      </label>
+      <div class="form-actions wide">
+        <button type="button" id="discover" class="ghost">Discover models</button>
+        <button type="button" id="test" class="ghost">Test connection</button>
+        <span id="form-status" class="form-status" role="status"></span>
+        <button type="submit" class="solid">Save model</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="turn-template">
+    <article class="turn">
+      <details class="trace" open>
+        <summary><span class="trace-title">Reasoning</span><span class="trace-meta"></span></summary>
+        <ol class="steps"></ol>
+      </details>
+      <div class="answer markdown"></div>
+      <div class="run-stats"></div>
+    </article>
+  </template>
+
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

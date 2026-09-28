@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "travel-tools": {
+      "command": "node",
+      "args": ["src/mcp/server.js"]
+    }
+  }
+}

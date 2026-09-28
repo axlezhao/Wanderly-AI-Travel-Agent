@@ -1,0 +1,24 @@
+{
+  "name": "travel-agent-demo",
+  "version": "1.0.0",
+  "description": "A ReAct travel-planning agent with an MCP tool server, a pluggable LLM (Claude, DeepSeek, any OpenAI-compatible API) and free, no-key travel APIs.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --watch --env-file-if-exists=.env server.js",
+    "mcp": "node src/mcp/server.js",
+    "test": "node --test \"test/*.test.js\"",
+    "eval": "node --env-file-if-exists=.env scripts/eval.js"
+  },
+  "engines": {
+    "node": ">=22.9"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "express": "^5.2.1",
+    "zod": "^4.6.5"
+  }
+}
