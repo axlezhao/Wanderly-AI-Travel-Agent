@@ -1,6 +1,6 @@
 # 🧭 Wanderly - AI Travel Agent
 
-Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
+Tell it *"3 days in LA"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
 
 <p align="center">
   <img src="docs/demo.gif" alt="Wanderly planning 3 days in Los Angeles: live reasoning trace, tool calls, map, weather and itinerary" width="100%">
@@ -57,7 +57,7 @@ flowchart LR
 
 ### ReAct in one paragraph
 
-**ReAct** (*Reason + Act*) is an agent pattern. Instead of answering in one shot, the model alternates between **Thought** ("I need Kyoto's coordinates first"), **Action** (call `search_destination`), and **Observation** (the tool's result), repeating until it has enough to write the **Answer**. Independent actions in one step run in parallel. In this app:
+**ReAct** (*Reason + Act*) is an agent pattern. Instead of answering in one shot, the model alternates between **Thought** ("I need Los Angeles' coordinates first"), **Action** (call `search_destination`), and **Observation** (the tool's result), repeating until it has enough to write the **Answer**. Independent actions in one step run in parallel. In this app:
 
 | ReAct | Claude | OpenAI-compatible | UI |
 |---|---|---|---|
