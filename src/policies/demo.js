@@ -24,7 +24,12 @@ const HOME_CURRENCY = process.env.HOME_CURRENCY || "USD";
 const NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, a: 1, an: 1, weekend: 2 };
 
 // The "Getting around" picker arrives as a tagged line appended by the server.
-const PREFERENCE_TAG = /\[Getting around: ([^\]]+)\]/i;
+// Common city abbreviations the geocoder would otherwise misread ("LA" → La, Cambodia).
+const CITY_ALIASES = {
+  LA: "Los Angeles", NYC: "New York", SF: "San Francisco", DC: "Washington",
+  HK: "Hong Kong", KL: "Kuala Lumpur", CDMX: "Mexico City",
+};
+const PREFERENCE_TAG =/\[Getting around: ([^\]]+)\]/i;
 const MODE_ICON = { walk: "🚶", bike: "🚲", drive: "🚗", transit: "🚇" };
 const MODE_WORD = { walk: "walk", bike: "bike", drive: "drive", transit: "transit" };
 
@@ -47,7 +52,8 @@ export function parseRequest(message) {
     // otherwise the first capitalized phrase that isn't the start of a sentence word like "Plan"
     text.match(/(?<![.!?]\s|^)\b([A-Z][\p{L}'’.-]+(?:\s+[A-Z][\p{L}'’.-]+)*)/u)?.[1] ??
     text.replace(/\b(plan|a|an|the|trip|days?|nights?|weekend|for|me|please|to|in|\d+)\b/gi, "").trim();
-  return { destination: place.replace(/[.,!?]+$/, "").trim(), days, travelMode };
+  const destination = place.replace(/[.,!?]+$/, "").trim();
+  return { destination: CITY_ALIASES[destination.toUpperCase()] ?? destination, days, travelMode };
 }
 
 export class DemoPolicy {

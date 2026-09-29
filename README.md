@@ -3,8 +3,8 @@
 Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Wanderly planning 3 days in Kyoto: live reasoning trace, tool calls, map, weather and itinerary" width="100%">
-  <br><sub>Planning 3 days in Kyoto in the no-key Demo mode. Each tool call, the map and the itinerary update live.</sub>
+  <img src="docs/demo.gif" alt="Wanderly planning 3 days in Los Angeles: live reasoning trace, tool calls, map, weather and itinerary" width="100%">
+  <br><sub>Planning 3 days in LA in the no-key Demo mode. Each tool call, the map and the itinerary update live.</sub>
 </p>
 
 - **ReAct architecture**: the agent loops *Thought → Action → Observation* until it can give a *Final Answer*, and the UI shows every step live.

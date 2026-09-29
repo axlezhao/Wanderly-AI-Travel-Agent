@@ -20,6 +20,8 @@ test("demo parser extracts destination and trip length", () => {
     ["Take me to Paris for a week", "Paris", 7],
     ["Kyoto", "Kyoto", 3],
     ["5 days exploring seoul", "Seoul", 5],
+    ["3 days in LA", "Los Angeles", 3],
+    ["a weekend in nyc", "New York", 2],
   ];
   for (const [message, destination, days] of cases) {
     assert.deepEqual(parseRequest(message), { destination, days, travelMode: null }, message);
