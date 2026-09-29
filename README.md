@@ -4,7 +4,7 @@ Tell it *"3 days in LA"* and watch it reason step by step, call real travel APIs
 
 <p align="center">
   <img src="docs/demo.gif" alt="Wanderly planning 3 days in Los Angeles: live reasoning trace, tool calls, map, weather and itinerary" width="100%">
-  <br><sub>Planning 3 days in LA in the no-key Demo mode. Each tool call, the map and the itinerary update live.</sub>
+  <br><sub>Planning 3 days in LA. This recording uses the no-key <b>Demo mode</b>, where a rule-based policy stands in for the LLM so anyone can run the app. Add a Claude, DeepSeek or other OpenAI-compatible API key and the same ReAct loop is driven by the model, which decides which tools to call and writes the itinerary.</sub>
 </p>
 
 - **ReAct architecture**: the agent loops *Thought → Action → Observation* until it can give a *Final Answer*, and the UI shows every step live.
