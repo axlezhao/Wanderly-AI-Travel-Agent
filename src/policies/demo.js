@@ -236,7 +236,8 @@ function action(tool, input) {
 }
 
 function firstSentences(text = "", n = 1) {
-  const sentences = text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]+(\s|$)/g) ?? [text];
+  // A period followed by a non-space (as in "3.0 million") is not a sentence end.
+  const sentences = text.replace(/\s+/g, " ").match(/(?:[^.!?]|[.!?](?=\S))+[.!?]+(?:\s|$)/g) ?? [text];
   return sentences.slice(0, n).join("").trim();
 }
 

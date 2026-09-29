@@ -2,6 +2,11 @@
 
 Tell it *"3 days in Kyoto"* and watch it reason step by step, call real travel APIs through an **MCP server**, and build a day-by-day itinerary with a live map, weather, top sights and places to eat.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Wanderly planning 3 days in Kyoto: live reasoning trace, tool calls, map, weather and itinerary" width="100%">
+  <br><sub>Planning 3 days in Kyoto in the no-key Demo mode. Each tool call, the map and the itinerary update live.</sub>
+</p>
+
 - **ReAct architecture**: the agent loops *Thought → Action → Observation* until it can give a *Final Answer*, and the UI shows every step live.
 - **MCP tool server, in Node.js or Go**: seven travel tools behind the [Model Context Protocol](https://modelcontextprotocol.io), with two interchangeable implementations of the same server. The web app uses them over MCP, and so can Claude Desktop or Claude Code.
 - **Pluggable brain**: Claude, DeepSeek, OpenAI, Groq, OpenRouter, a local Ollama… Add a model from the UI by typing its API key, or run the no-key **Demo** policy.
@@ -147,7 +152,7 @@ To add a new kind of provider, write a policy class in `src/policies/` with `add
 ## Tests and evals
 
 ```bash
-npm test                                   # 27 offline tests: harness, memory, MCP contract (Node + Go servers), policies
+npm test                                   # 38 offline tests: harness, memory, MCP contract (Node + Go servers), policies
 npm run test:go                            # Go server unit tests (mock HTTP servers, in-memory MCP client)
 npm run eval                               # live end-to-end scenarios with the default model
 npm run eval -- --model demo               # a specific model (ids: npm run eval -- --list)
