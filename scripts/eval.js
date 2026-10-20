@@ -6,6 +6,8 @@
 //   npm run eval -- --model demo          # a specific model id (see /api/status or the Models dialog)
 //   npm run eval -- --only kyoto,lisbon   # a subset of scenarios
 //   npm run eval -- --list                # show model ids
+//   npm run eval -- --harness langgraph   # run through the LangGraph harness instead of the ReAct loop
+//   npm run eval -- --harness react,langgraph   # both, side by side, with a comparison
 //
 // Results are printed as a table and saved to evals/results/<time>_<model>.json,
 // so you can compare models or prompt changes over time.
@@ -13,7 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ReActHarness } from "../src/harness/harness.js";
+import { HARNESSES, createHarness } from "../src/harness/create.js";
 import { McpToolbox } from "../src/harness/toolbox.js";
 import { JsonlTracer } from "../src/harness/tracer.js";
 import { ModelRegistry } from "../src/models/registry.js";
@@ -92,51 +94,90 @@ if (!model) {
 const only = flag("only")?.split(",");
 const scenarios = SCENARIOS.filter((s) => !only || only.includes(s.id));
 
-const toolbox = new McpToolbox();
-const harness = new ReActHarness({ toolbox, tracer: new JsonlTracer(path.join(root, "traces")) });
-const tools = await toolbox.listTools();
-
-console.log(`\nEvaluating ${model.label} on ${scenarios.length} scenario(s)…\n`);
-const results = [];
-
-for (const scenario of scenarios) {
-  const events = [];
-  const policy = registry.createPolicy(model, tools);
-  policy.addUserMessage(scenario.prompt);
-  const runId = `eval_${scenario.id}_${Date.now()}`;
-  process.stdout.write(`▶ ${scenario.id.padEnd(14)}`);
-  await harness.run({ policy, runId, onEvent: (e) => events.push(e), meta: { eval: scenario.id, model: model.id } });
-
-  const record = {
-    answer: events.find((e) => e.type === "answer")?.text ?? "",
-    actions: events.filter((e) => e.type === "action"),
-    observations: events.filter((e) => e.type === "observation"),
-    end: events.find((e) => e.type === "run_end"),
-    namesFrom: (kind) => events.filter((e) => e.type === "observation" && e.ui?.kind === kind).flatMap((e) => e.ui.items.map((i) => i.name)),
-  };
-  const checks = Object.entries(scenario.checks).map(([name, fn]) => {
-    let pass = false;
-    try { pass = Boolean(fn(record)); } catch {}
-    return { name, pass };
-  });
-  const passed = checks.filter((c) => c.pass).length;
-  const e = record.end;
-  console.log(
-    `${passed}/${checks.length} checks · ${e.steps} steps · ${e.toolCalls} tools · ${(e.durationMs / 1000).toFixed(1)}s` +
-      (e.usage ? ` · ${e.usage.input_tokens + e.usage.output_tokens} tokens` : ""),
-  );
-  for (const c of checks) console.log(`    ${c.pass ? "✔" : "✘"} ${c.name}`);
-  results.push({ scenario: scenario.id, prompt: scenario.prompt, runId, checks, stats: e, answer: record.answer });
+const harnessKinds = (flag("harness") ?? "react").split(",");
+for (const kind of harnessKinds) {
+  if (!HARNESSES[kind]) {
+    console.error(`Unknown harness "${kind}". Use one of: ${Object.keys(HARNESSES).join(", ")}.`);
+    process.exit(1);
+  }
 }
 
-await toolbox.close();
+// Each harness gets its own MCP server, so one can't benefit from the other's tool cache.
+const runners = harnessKinds.map((kind) => {
+  const toolbox = new McpToolbox();
+  return { kind, toolbox, harness: createHarness(kind, { toolbox, tracer: new JsonlTracer(path.join(root, "traces")) }) };
+});
+const tools = await runners[0].toolbox.listTools();
 
-const total = results.reduce((n, r) => n + r.checks.length, 0);
-const passed = results.reduce((n, r) => n + r.checks.filter((c) => c.pass).length, 0);
-console.log(`\nScore: ${passed}/${total} checks passed (${Math.round((passed / total) * 100)}%)`);
+console.log(`\nEvaluating ${model.label} on ${scenarios.length} scenario(s) with harness: ${harnessKinds.join(", ")}…\n`);
+const results = [];
+
+for (const [i, scenario] of scenarios.entries()) {
+  // Alternate which harness goes first, so neither always gets the warmer public APIs.
+  const order = i % 2 ? [...runners].reverse() : runners;
+  for (const { kind, harness } of order) {
+    const events = [];
+    const policy = registry.createPolicy(model, tools);
+    policy.addUserMessage(scenario.prompt);
+    const runId = `eval_${scenario.id}_${kind}_${Date.now()}`;
+    process.stdout.write(`▶ ${scenario.id.padEnd(14)}${runners.length > 1 ? kind.padEnd(10) : ""}`);
+    await harness.run({ policy, runId, onEvent: (e) => events.push(e), meta: { eval: scenario.id, model: model.id } });
+
+    const record = {
+      answer: events.find((e) => e.type === "answer")?.text ?? "",
+      actions: events.filter((e) => e.type === "action"),
+      observations: events.filter((e) => e.type === "observation"),
+      end: events.find((e) => e.type === "run_end"),
+      namesFrom: (kind) => events.filter((e) => e.type === "observation" && e.ui?.kind === kind).flatMap((e) => e.ui.items.map((i) => i.name)),
+    };
+    const checks = Object.entries(scenario.checks).map(([name, fn]) => {
+      let pass = false;
+      try { pass = Boolean(fn(record)); } catch {}
+      return { name, pass };
+    });
+    const passed = checks.filter((c) => c.pass).length;
+    const e = record.end;
+    console.log(
+      `${passed}/${checks.length} checks · ${e.steps} steps · ${e.toolCalls} tools · ${(e.durationMs / 1000).toFixed(1)}s` +
+        (e.usage ? ` · ${e.usage.input_tokens + e.usage.output_tokens} tokens` : ""),
+    );
+    for (const c of checks) console.log(`    ${c.pass ? "✔" : "✘"} ${c.name}`);
+    results.push({ scenario: scenario.id, harness: kind, prompt: scenario.prompt, runId, checks, stats: e, answer: record.answer });
+  }
+}
+
+await Promise.all(runners.map((r) => r.toolbox.close()));
+
+const scores = {};
+for (const kind of harnessKinds) {
+  const mine = results.filter((r) => r.harness === kind);
+  scores[kind] = {
+    passed: mine.reduce((n, r) => n + r.checks.filter((c) => c.pass).length, 0),
+    total: mine.reduce((n, r) => n + r.checks.length, 0),
+    steps: mine.reduce((n, r) => n + r.stats.steps, 0),
+    toolCalls: mine.reduce((n, r) => n + r.stats.toolCalls, 0),
+    durationMs: mine.reduce((n, r) => n + r.stats.durationMs, 0),
+  };
+}
+console.log("");
+for (const [kind, s] of Object.entries(scores)) {
+  console.log(
+    `Score${runners.length > 1 ? ` (${kind})` : ""}: ${s.passed}/${s.total} checks passed (${Math.round((s.passed / s.total) * 100)}%)` +
+      (runners.length > 1 ? ` · ${s.steps} steps · ${s.toolCalls} tools · ${(s.durationMs / 1000).toFixed(1)}s total` : ""),
+  );
+}
+if (runners.length > 1) {
+  // Same model and prompt, so differences come from the harness (or from the model's own randomness).
+  const [a, b] = harnessKinds;
+  const differ = scenarios.filter((sc) => {
+    const [ra, rb] = [a, b].map((k) => results.find((r) => r.scenario === sc.id && r.harness === k));
+    return ra.checks.some((c, i) => c.pass !== rb.checks[i].pass) || ra.stats.steps !== rb.stats.steps || ra.stats.toolCalls !== rb.stats.toolCalls;
+  });
+  console.log(differ.length ? `Behaved differently on: ${differ.map((sc) => sc.id).join(", ")}` : `${a} and ${b} took the same steps and tool calls and passed the same checks.`);
+}
 
 const outDir = path.join(root, "evals", "results");
 fs.mkdirSync(outDir, { recursive: true });
-const file = path.join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}_${model.id}.json`);
-fs.writeFileSync(file, JSON.stringify({ model: { id: model.id, label: model.label }, score: { passed, total }, results }, null, 2));
+const file = path.join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}_${model.id}_${harnessKinds.join("-")}.json`);
+fs.writeFileSync(file, JSON.stringify({ model: { id: model.id, label: model.label }, harnesses: harnessKinds, scores, results }, null, 2));
 console.log(`Saved ${path.relative(root, file)}\n`);

@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "start:go": "npm run build:go && MCP_SERVER=go node --env-file-if-exists=.env server.js",
+    "start:langgraph": "HARNESS=langgraph node --env-file-if-exists=.env server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
     "mcp": "node src/mcp/server.js",
     "build:go": "cd mcp-go && go build -o bin/wanderly-mcp .",
@@ -20,6 +21,8 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
+    "@langchain/core": "1.2.14",
+    "@langchain/langgraph": "1.4.19",
     "@modelcontextprotocol/sdk": "^1.30.1",
     "express": "^5.2.1",
     "zod": "^4.6.5"
