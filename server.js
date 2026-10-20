@@ -10,7 +10,7 @@ import express from "express";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { ReActHarness } from "./src/harness/harness.js";
+import { createHarness } from "./src/harness/create.js";
 import { McpToolbox } from "./src/harness/toolbox.js";
 import { JsonlTracer } from "./src/harness/tracer.js";
 import { SessionStore } from "./src/harness/sessions.js";
@@ -23,7 +23,9 @@ const HOST = process.env.HOST || "127.0.0.1";
 const SESSION_TTL_MS = 30 * 60 * 1000; // forget idle sessions after 30 minutes
 
 const toolbox = new McpToolbox();
-const harness = new ReActHarness({
+// HARNESS=langgraph runs the same loop as a LangGraph graph (src/harness/langgraph-harness.js).
+const HARNESS = process.env.HARNESS || "react";
+const harness = createHarness(HARNESS, {
   toolbox,
   tracer: new JsonlTracer(path.join(here, "traces")),
   ...(process.env.MAX_STEPS && { maxSteps: Number(process.env.MAX_STEPS) }), // default 6
@@ -64,6 +66,7 @@ app.get("/api/status", async (_req, res) => {
       models: models.publicList(),
       presets: PRESETS,
       mcpServer: toolbox.kind,
+      harness: HARNESS,
       providers: PROVIDERS,
       tools: tools.map((t) => ({ name: t.name, description: t.description })),
     });
@@ -190,7 +193,8 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`\n  🧭 Wanderly travel agent running at http://localhost:${PORT}`);
   console.log(`     Models: ${models.all().map((m) => m.label).join(" | ")}`);
   console.log(`     Default: ${models.get(models.defaultId()).label}`);
-  console.log(`     MCP tool server: ${toolbox.kind === "go" ? "Go (mcp-go/)" : "Node (src/mcp/server.js)"}\n`);
+  console.log(`     MCP tool server: ${toolbox.kind === "go" ? "Go (mcp-go/)" : "Node (src/mcp/server.js)"}`);
+  console.log(`     Harness: ${HARNESS === "langgraph" ? "LangGraph graph" : "ReAct loop"}\n`);
 });
 
 async function shutdown() {
