@@ -4,7 +4,10 @@
 //
 //   interface Toolbox {
 //     listTools(): Promise<{ name, description, inputSchema }[]>
-//     callTool(name, input, { signal, timeoutMs }): Promise<{ text, ui, isError, retryable }>
+//     callTool(name, input, { signal, timeoutMs }): Promise<{ text, ui, isError, retry?, invalidInput? }>
+//       retry         on errors: "transient" | "once" | "never" (see src/tools/travel-apis.js)
+//       invalidInput  the call was rejected before any tool code ran (arguments failed
+//                     the schema, unknown tool): only the model can fix it
 //     close(): Promise<void>
 //   }
 
@@ -13,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..", "..");
@@ -71,17 +75,26 @@ export class McpToolbox {
 
   async callTool(name, input, { signal, timeoutMs = 30000 } = {}) {
     await this.connect();
-    const res = await this.client.callTool({ name, arguments: input }, undefined, { signal, timeout: timeoutMs });
+    let res;
+    try {
+      res = await this.client.callTool({ name, arguments: input }, undefined, { signal, timeout: timeoutMs });
+    } catch (err) {
+      // Some servers reject bad arguments or an unknown tool as a protocol error (the Go SDK
+      // does for unknown tools). Anything else (timeout, crash) is left to the harness.
+      if (err instanceof McpError && err.code === ErrorCode.InvalidParams) {
+        return { text: `Error: ${err.message}`, ui: null, isError: true, retry: "never", invalidInput: true };
+      }
+      throw err;
+    }
     const text = (res.content ?? [])
       .filter((c) => c.type === "text")
       .map((c) => c.text)
       .join("\n");
-    return {
-      text,
-      ui: res._meta?.ui ?? null,
-      isError: Boolean(res.isError),
-      retryable: Boolean(res._meta?.retryable),
-    };
+    if (!res.isError) return { text, ui: res._meta?.ui ?? null, isError: false };
+    // Our tools always say how to retry. An error without _meta.retry came from the MCP SDK
+    // itself, before any tool code ran: the same call would fail the same way.
+    const retry = res._meta?.retry;
+    return { text, ui: null, isError: true, retry: retry ?? "never", invalidInput: !retry };
   }
 
   async close() {

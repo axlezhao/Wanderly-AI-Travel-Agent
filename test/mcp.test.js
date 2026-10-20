@@ -40,10 +40,11 @@ for (const kind of ["node", "go"]) {
       assert.ok(places.inputSchema.properties.category.enum.includes("restaurant"));
     });
 
-    test("rejects bad input with a clear, non-retryable error", async () => {
+    test("rejects bad input with a clear error that is never retried", async () => {
       const res = await toolbox.callTool("get_weather", { latitude: "north", longitude: 10 });
       assert.equal(res.isError, true);
-      assert.equal(res.retryable, false);
+      assert.equal(res.retry, "never");
+      assert.equal(res.invalidInput, true, "rejected by the schema, before the tool ran");
       assert.match(res.text, /latitude/);
 
       const res2 = await toolbox.callTool("find_places", { latitude: 1, longitude: 2, category: "casino" });
@@ -52,6 +53,21 @@ for (const kind of ["node", "go"]) {
 
       const res3 = await toolbox.callTool("get_weather", { latitude: 100, longitude: 10 });
       assert.equal(res3.isError, true, "latitude above 90 is out of range");
+    });
+
+    test("an unknown tool is invalid input, not a temporary failure", async () => {
+      const res = await toolbox.callTool("book_flight", {});
+      assert.equal(res.isError, true);
+      assert.equal(res.retry, "never");
+      assert.equal(res.invalidInput, true);
+    });
+
+    test("errors from the tool itself carry _meta.retry", async () => {
+      const res = await toolbox.callTool("get_weather", { latitude: 1, longitude: 2, start_date: "2026-13-45" });
+      assert.equal(res.isError, true);
+      assert.match(res.text, /Invalid start_date/);
+      assert.equal(res.retry, "never");
+      assert.equal(res.invalidInput, false, "the tool ran: the model may still get a general-knowledge fallback");
     });
 
     test("same-currency conversion works without the network", async () => {
