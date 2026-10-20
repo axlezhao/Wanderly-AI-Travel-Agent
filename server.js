@@ -1,8 +1,11 @@
 // Web server: serves the UI and streams ReAct runs to the browser.
 //
-//   browser ──POST /api/chat──▶ server.js ──▶ ReActHarness ──▶ policy (Claude, DeepSeek/OpenAI-compatible, or demo)
-//                                                   │
-//                                                   └──▶ McpToolbox ══stdio══▶ MCP server ──▶ free travel APIs
+//   browser ──POST /api/chat──▶ server.js ──▶ harness ──▶ policy (Claude, DeepSeek/OpenAI-compatible, or demo)
+//                                                │
+//                                                └──▶ McpToolbox ══stdio══▶ MCP server ──▶ free travel APIs
+//
+// The harness is the hand-written ReAct loop, or the same loop as a LangGraph
+// graph with HARNESS=langgraph (see src/harness/create.js).
 //
 // Each response is newline-delimited JSON: one harness event per line.
 

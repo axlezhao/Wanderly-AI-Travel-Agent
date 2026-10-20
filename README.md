@@ -10,7 +10,7 @@ Tell it *"3 days in LA"* and watch it reason step by step, call real travel APIs
 - **ReAct architecture**: the agent loops *Thought → Action → Observation* until it can give a *Final Answer*, and the UI shows every step live.
 - **MCP tool server, in Node.js or Go**: seven travel tools behind the [Model Context Protocol](https://modelcontextprotocol.io), with two interchangeable implementations of the same server. The web app uses them over MCP, and so can Claude Desktop or Claude Code.
 - **Pluggable brain**: Claude, DeepSeek, OpenAI, Groq, OpenRouter, a local Ollama… Add a model from the UI by typing its API key, or run the no-key **Demo** policy.
-- **Production-style harness**: step limits, per-tool timeouts, retries with backoff, cancellation, caching, output truncation, JSONL traces, unit tests and an eval suite.
+- **Production-style harness**: step limits, per-tool timeouts, retries with backoff, cancellation, caching, output truncation, JSONL traces, unit tests and an eval suite. An optional **LangGraph** version runs the same loop as a state graph.
 - **Getting around**: each day ends with a transport recommendation (walk, bike, drive or transit, with real bus/metro/train lines). Set your preference in the chat box, or the agent asks you when it matters (for example a multi-city trip).
 - **Replies in your language**: ask in Chinese, Spanish or anything else and the plan comes back in that language.
 - **Short-term memory and chat history**: the agent remembers the conversation (even when you switch models), and a page refresh restores the chat, map and trip board. Everything is forgotten when you close the tab.
@@ -45,7 +45,7 @@ Keys stay on your computer (`.env` and `models.local.json` are git-ignored) and 
 ```mermaid
 flowchart LR
     UI["Browser UI<br/>chat + trace + map"] -- "POST /api/chat<br/>(NDJSON event stream)" --> S[server.js]
-    S --> H["ReAct harness<br/>src/harness/harness.js"]
+    S --> H["ReAct harness<br/>harness.js (default)<br/>or LangGraph: langgraph-harness.js"]
     H <-- "decide / observe" --> P{"Policy (the brain)"}
     P --- C[Claude]
     P --- O["OpenAI-compatible<br/>DeepSeek, OpenAI, Ollama…"]
@@ -95,7 +95,9 @@ npm run start:langgraph                                    # or HARNESS=langgrap
 npm run eval -- --model demo --harness react,langgraph     # run both and compare
 ```
 
-The hand-written loop stays the default. The graph version is the starting point for features where a graph pays off: a planner/critic split, human-in-the-loop pauses, or checkpointed sessions that survive a restart.
+The hand-written loop stays the default. The graph version is the starting point for features where a graph pays off: a planner/critic split, human-in-the-loop pauses, or checkpointed sessions that survive a restart. It doesn't use a LangGraph checkpointer yet: each model's conversation lives in its policy object, not in graph state, so a run can't be resumed after a restart.
+
+On the Demo policy both harnesses take the same steps and make the same tool calls. LangGraph adds about 3 ms of overhead per run, about 250 ms at startup and about 26 MB of dependencies.
 
 ### The MCP server (Node.js or Go)
 
@@ -109,6 +111,16 @@ There are two implementations of the same server, with the same tools, schemas a
 | Tests | `npm test` | `npm run test:go` |
 
 The agent and web UI don't change at all when you switch. That's the point of MCP: tools written in one language, used by an agent written in another. `npm test` runs the same contract tests against both servers and checks that their tool schemas are identical.
+
+Every tool result has the same shape in both servers:
+
+| Field | What it holds |
+|---|---|
+| `content[0].text` | the JSON observation the model reads |
+| `_meta.ui` | extra data for the web UI (images, map pins); other MCP clients ignore it |
+| `_meta.retry` | on errors, how the harness should retry: `transient` (timeouts, 408/425/429/5xx: up to 3 tries with backoff), `once` (an unexpected failure: one more try) or `never` (nothing found, other 4xx, bad input, or the tool already retried) |
+
+An error with no `_meta.retry` was produced by the MCP SDK before any tool ran (arguments failed the schema, or the tool doesn't exist). The harness doesn't retry it, and doesn't tell the model to fall back on its own knowledge either: the model just needs to fix its arguments.
 
 
 [`src/mcp/server.js`](src/mcp/server.js) exposes seven read-only tools (zod-validated inputs) plus a `plan_trip` prompt:
@@ -163,7 +175,7 @@ To add a new kind of provider, write a policy class in `src/policies/` with `add
 ## Tests and evals
 
 ```bash
-npm test                                   # 60 offline tests: harness (run against both harnesses), memory, MCP contract (Node + Go servers), policies
+npm test                                   # 68 offline tests: harness (run against both harnesses), memory, MCP contract and retry values (Node + Go servers), policies
 npm run test:go                            # Go server unit tests (mock HTTP servers, in-memory MCP client)
 npm run eval                               # live end-to-end scenarios with the default model
 npm run eval -- --model demo               # a specific model (ids: npm run eval -- --list)
@@ -173,7 +185,7 @@ npm run eval -- --harness react,langgraph  # both harnesses side by side
 
 `npm test` needs no network or keys. It uses a fake toolbox, scripted policies, and a mock OpenAI-style server that streams fragmented tool calls. If Go is installed, it also runs the MCP contract tests against the Go server.
 
-`npm run eval` runs real trip requests through the full stack and scores them with automatic checks: *looked up the destination first*, *names ≥3 real sights returned by the tools* (a grounding check against hallucinated places), *used last year's weather for far-off dates*, *admits when a place doesn't exist*, *≤ 6 steps*. Results are saved to `evals/results/` so you can compare models or prompt changes.
+`npm run eval` runs real trip requests through the full stack and scores them with automatic checks: *looked up the destination first*, *names ≥3 real sights returned by the tools* (a grounding check against hallucinated places), *used last year's weather for far-off dates*, *admits when a place doesn't exist*, *≤ 6 steps*. Results are saved to `evals/results/` (one file per run, named after the model and harness) so you can compare models, harnesses or prompt changes. With `--harness react,langgraph`, each harness gets its own MCP server so neither benefits from the other's cache, and the summary lists any scenario where they behaved differently.
 
 ---
 
@@ -220,5 +232,5 @@ Memory is shared across models: plan with DeepSeek, switch to Claude, and ask "w
 ## Limits
 
 - No flight or hotel prices or booking: there's no free, keyless API for that. The agent says so.
-- The Overpass (OpenStreetMap) server is shared and sometimes slow. The harness retries and the agent adapts, but a lookup can occasionally take 10–20 s.
+- The Overpass (OpenStreetMap) server is shared and sometimes overloaded. A lookup then tries both of its servers, which can take up to about 45 s, before the agent fills that part from general knowledge (labeled as such). Running your own Overpass server avoids this.
 - Sessions live in memory; restarting the server clears conversations.
