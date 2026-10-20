@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -76,21 +77,42 @@ func TestSearchDestination(t *testing.T) {
 func TestSearchDestinationNotFoundIsPermanent(t *testing.T) {
 	mock(t, &geocodeURL, jsonReply(`{}`))
 	_, _, err := searchDestination(context.Background(), SearchInput{Query: "Qwxzplk"})
-	if err == nil || isRetryable(err) || !strings.Contains(err.Error(), "No place found") {
+	if err == nil || retryOf(err) != RetryNever || !strings.Contains(err.Error(), "No place found") {
 		t.Fatalf("want permanent not-found error, got %v", err)
 	}
 }
 
 func TestHTTPErrorsAreClassified(t *testing.T) {
 	for _, tc := range []struct {
-		status    int
-		retryable bool
-	}{{429, true}, {503, true}, {404, false}, {400, false}} {
+		status int
+		retry  Retry
+	}{{408, RetryTransient}, {429, RetryTransient}, {503, RetryTransient}, {404, RetryNever}, {400, RetryNever}} {
 		mock(t, &geocodeURL, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) })
 		_, _, err := searchDestination(context.Background(), SearchInput{Query: "x"})
-		if isRetryable(err) != tc.retryable {
-			t.Errorf("status %d: retryable=%v, want %v (%v)", tc.status, isRetryable(err), tc.retryable, err)
+		if got := retryOf(err); got != tc.retry {
+			t.Errorf("status %d: retry=%q, want %q (%v)", tc.status, got, tc.retry, err)
 		}
+	}
+}
+
+func TestUnexpectedFailuresGetOneMoreTry(t *testing.T) {
+	mock(t, &geocodeURL, jsonReply(`{"results": [`))
+	_, _, err := searchDestination(context.Background(), SearchInput{Query: "x"})
+	if got := retryOf(err); got != RetryOnce {
+		t.Errorf("invalid JSON: retry=%q, want once (%v)", got, err)
+	}
+	if got := retryOf(errors.New("some bug")); got != RetryOnce {
+		t.Errorf("a plain error: retry=%q, want once", got)
+	}
+}
+
+func TestOverloadedOverpassIsNotRetriedAgain(t *testing.T) {
+	busy := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTooManyRequests) }
+	mock(t, &overpassPrimary, busy)
+	mock(t, &overpassFallback, busy)
+	_, _, err := findPlaces(context.Background(), PlacesInput{Latitude: 1, Longitude: 2, Category: "cafe"})
+	if err == nil || !strings.Contains(err.Error(), "overloaded") || retryOf(err) != RetryNever {
+		t.Fatalf("both mirrors already had their tries, so the harness must not retry: %v (retry=%q)", err, retryOf(err))
 	}
 }
 
@@ -195,8 +217,8 @@ func TestCancellationAbortsInFlightRequests(t *testing.T) {
 
 	start := time.Now()
 	_, _, err := searchDestination(ctx, SearchInput{Query: "slow"})
-	if err == nil || err.Error() != "Cancelled." || isRetryable(err) {
-		t.Fatalf("want non-retryable Cancelled, got %v", err)
+	if err == nil || err.Error() != "Cancelled." || retryOf(err) != RetryNever {
+		t.Fatalf("want Cancelled with retry=never, got %v", err)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Errorf("cancellation took too long: %v", time.Since(start))
@@ -271,7 +293,7 @@ func TestMCPResultFormat(t *testing.T) {
 	}
 }
 
-func TestMCPErrorsCarryRetryableFlag(t *testing.T) {
+func TestMCPErrorsCarryRetry(t *testing.T) {
 	mock(t, &geocodeURL, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
 	cs := connect(t)
 
@@ -279,8 +301,8 @@ func TestMCPErrorsCarryRetryableFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.IsError || res.Meta["retryable"] != true {
-		t.Errorf("a 503 should be an isError result with _meta.retryable=true: %+v", res)
+	if !res.IsError || res.Meta["retry"] != "transient" {
+		t.Errorf(`a 503 should be an isError result with _meta.retry="transient": %+v`, res)
 	}
 	if text := res.Content[0].(*mcp.TextContent).Text; !strings.HasPrefix(text, "Error: ") {
 		t.Errorf("error text: %q", text)

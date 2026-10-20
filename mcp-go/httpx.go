@@ -18,22 +18,43 @@ import (
 
 const userAgent = "Wanderly/1.0 (https://github.com/axlezhao/Wanderly-AI-Travel-Agent)"
 
+// Retry tells the harness whether and how trying a failed call again could help
+// (sent as _meta.retry; the same values as the Node server).
+type Retry string
+
+const (
+	RetryTransient Retry = "transient" // a temporary failure (timeout, 429, 5xx): retry with backoff
+	RetryOnce      Retry = "once"      // an unexpected failure: one more try might work
+	RetryNever     Retry = "never"     // the same call fails the same way (nothing found, bad input, already retried here)
+)
+
 // ToolError is a failure the agent should see as an Observation.
-// Retryable tells the harness whether trying again might help (429, 5xx, timeouts).
 type ToolError struct {
-	Msg       string
-	Retryable bool
+	Msg   string
+	Retry Retry // empty means RetryNever
 }
 
 func (e *ToolError) Error() string { return e.Msg }
 
 func permanent(format string, args ...any) error {
-	return &ToolError{Msg: fmt.Sprintf(format, args...)}
+	return &ToolError{Msg: fmt.Sprintf(format, args...), Retry: RetryNever}
 }
 
-func isRetryable(err error) bool {
+// retryOf says how to retry err. Anything that isn't a ToolError is a bug or a
+// malformed response: worth one more try.
+func retryOf(err error) Retry {
 	var te *ToolError
-	return errors.As(err, &te) && te.Retryable
+	if !errors.As(err, &te) {
+		return RetryOnce
+	}
+	if te.Retry == "" {
+		return RetryNever
+	}
+	return te.Retry
+}
+
+func transientStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooEarly || code == http.StatusTooManyRequests || code >= 500
 }
 
 var httpClient = &http.Client{}
@@ -129,13 +150,14 @@ func getJSON(ctx context.Context, req request, out any) error {
 		return networkError(ctx, reqCtx, host, err)
 	}
 	if resp.StatusCode >= 300 {
-		return &ToolError{
-			Msg:       fmt.Sprintf("%s responded %d", host, resp.StatusCode),
-			Retryable: resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+		retry := RetryNever
+		if transientStatus(resp.StatusCode) {
+			retry = RetryTransient
 		}
+		return &ToolError{Msg: fmt.Sprintf("%s responded %d", host, resp.StatusCode), Retry: retry}
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return &ToolError{Msg: fmt.Sprintf("%s returned invalid JSON", host), Retryable: true}
+		return &ToolError{Msg: fmt.Sprintf("%s returned invalid JSON", host), Retry: RetryOnce}
 	}
 	cachePut(key, data)
 	return nil
@@ -149,7 +171,7 @@ func networkError(parent, reqCtx context.Context, host string, err error) error 
 	if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 		reason = "timed out"
 	}
-	return &ToolError{Msg: fmt.Sprintf("%s unreachable (%s)", host, reason), Retryable: true}
+	return &ToolError{Msg: fmt.Sprintf("%s unreachable (%s)", host, reason), Retry: RetryTransient}
 }
 
 func hostOf(raw string) string {

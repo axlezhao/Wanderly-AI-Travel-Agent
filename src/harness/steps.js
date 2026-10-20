@@ -26,9 +26,6 @@ export const DEFAULTS = {
   modelRetryMaxDelayMs: 20000,
 };
 
-// Retrying the identical call can't fix bad arguments; the model has to change them.
-const INVALID_INPUT = /input validation error|validating "arguments"|invalid arguments/i;
-
 const FALLBACK_HINT =
   "\n\n[Harness] This lookup failed even after a retry. Don't call it again. " +
   "Fill this part from your own general knowledge, and label it briefly as general knowledge (not live data).";
@@ -78,7 +75,7 @@ export async function runAction(action, { toolbox, options, step, emit, signal, 
   } else if ((failures.get(tool) ?? 0) >= circuitBreakAfter) {
     // This tool keeps failing this run: don't wait on it again.
     skipped = true;
-    outcome = { text: `Error: ${tool} is unavailable right now (it failed repeatedly), so it was skipped.`, ui: null, isError: true, retryable: false };
+    outcome = { text: `Error: ${tool} is unavailable right now (it failed repeatedly), so it was skipped.`, ui: null, isError: true, retry: "never" };
   } else {
     while (true) {
       attempts++;
@@ -87,12 +84,14 @@ export async function runAction(action, { toolbox, options, step, emit, signal, 
       } catch (err) {
         throwIfAborted(signal);
         // Transport-level failure (timeout, server crash): treat as transient.
-        outcome = { text: `Error: ${err.message}`, ui: null, isError: true, retryable: true };
+        outcome = { text: `Error: ${err.message}`, ui: null, isError: true, retry: "transient" };
       }
       if (!outcome.isError) break;
-      // Transient errors get up to maxRetries more tries; any other failure gets one second try,
-      // except bad input, which only the model can fix.
-      const retriesAllowed = outcome.retryable ? maxRetries : INVALID_INPUT.test(outcome.text) ? 0 : 1;
+      // The tool says how to retry: transient failures get up to maxRetries more tries,
+      // unexpected ones a second try, and "never" (nothing found, bad input, the tool
+      // already retried) none. A toolbox that doesn't say gets the cautious middle.
+      const retry = outcome.retry ?? "once";
+      const retriesAllowed = retry === "transient" ? maxRetries : retry === "once" ? 1 : 0;
       if (attempts > retriesAllowed) break;
       stats.retries++;
       emit({ type: "retry", step, id, tool, attempt: attempts + 1, reason: outcome.text });
@@ -105,8 +104,9 @@ export async function runAction(action, { toolbox, options, step, emit, signal, 
   if (outcome.isError) {
     stats.toolErrors++;
     failures.set(tool, (failures.get(tool) ?? 0) + 1);
-    // Out of retries: hand this part over to the model's own knowledge.
-    if (!INVALID_INPUT.test(outcome.text)) {
+    // Out of retries: hand this part over to the model's own knowledge,
+    // unless the model just needs to fix its arguments.
+    if (!outcome.invalidInput) {
       fallback = true;
       stats.fallbacks++;
       content += FALLBACK_HINT;

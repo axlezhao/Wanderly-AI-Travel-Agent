@@ -9,13 +9,14 @@
 //
 //	content[0].text -> the JSON observation the model reads
 //	_meta.ui        -> extra data for the web UI (images, map pins); other MCP clients ignore it
-//	_meta.retryable -> on errors, whether trying again might help (used by the harness)
+//	_meta.retry     -> on errors, "transient" | "once" | "never": whether and how trying
+//	                   again could help (used by the harness). Errors the MCP SDK produces
+//	                   itself, before a tool runs (bad arguments, unknown tool), have no _meta.
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -149,12 +150,10 @@ func register[In any](s *mcp.Server, name, title, description string, schema *js
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		result, ui, err := fn(ctx, in)
 		if err != nil {
-			var te *ToolError
-			retryable := errors.As(err, &te) && te.Retryable
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
-				Meta:    mcp.Meta{"retryable": retryable},
+				Meta:    mcp.Meta{"retry": string(retryOf(err))},
 			}, nil, nil
 		}
 		text, err := json.Marshal(result)

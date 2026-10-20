@@ -38,7 +38,8 @@ function fakeToolbox(behaviors) {
   };
 }
 
-const ok = (text) => ({ text, ui: null, isError: false, retryable: false });
+const ok = (text) => ({ text, ui: null, isError: false });
+const fail = (text, retry, extra = {}) => ({ text, ui: null, isError: true, retry, ...extra });
 const act = (...tools) => ({ thought: "need data", actions: tools.map((t, i) => ({ id: `${t}_${i}`, tool: t, input: { q: t } })) });
 
 async function run(harness, policy, extra = {}) {
@@ -103,7 +104,7 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
 
     test("retries transient failures with backoff, then succeeds", async () => {
       const toolbox = fakeToolbox({
-        a: async (_input, n) => (n < 3 ? { text: "Error: 503", ui: null, isError: true, retryable: true } : ok('{"fine":true}')),
+        a: async (_input, n) => (n < 3 ? fail("Error: 503", "transient") : ok('{"fine":true}')),
       });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const policy = scripted([act("a"), { answer: "done" }]);
@@ -117,7 +118,7 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
     });
 
     test("tries a failed lookup a second time, then hands the gap to the model's own knowledge", async () => {
-      const toolbox = fakeToolbox({ a: async () => ({ text: "Error: no such place", ui: null, isError: true, retryable: false }) });
+      const toolbox = fakeToolbox({ a: async () => fail("Error: something odd", "once") });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const policy = scripted([act("a"), { answer: "sorry" }]);
       const { end, events } = await run(harness, policy);
@@ -125,7 +126,7 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
       assert.equal(toolbox.calls.length, 2, "one retry for a non-transient failure");
       const obs = policy.seen.observations[0];
       assert.equal(obs.isError, true);
-      assert.match(obs.content, /no such place/);
+      assert.match(obs.content, /something odd/);
       assert.match(obs.content, /general knowledge/, "the model is told to fall back on its own knowledge");
       assert.equal(events.find((e) => e.type === "observation").fallback, true);
       assert.equal(end.toolErrors, 1);
@@ -134,7 +135,7 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
 
     test("a second try that succeeds is a normal observation", async () => {
       const toolbox = fakeToolbox({
-        a: async (_i, n) => (n === 1 ? { text: "Error: not found", ui: null, isError: true, retryable: false } : ok('{"ok":1}')),
+        a: async (_i, n) => (n === 1 ? fail("Error: hiccup", "once") : ok('{"ok":1}')),
       });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const policy = scripted([act("a"), { answer: "done" }]);
@@ -144,9 +145,8 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
     });
 
     test("does not retry invalid input: only the model can fix its arguments", async () => {
-      const toolbox = fakeToolbox({
-        a: async () => ({ text: "MCP error -32602: Input validation error: latitude must be a number", ui: null, isError: true, retryable: false }),
-      });
+      // No error-text matching: the toolbox's invalidInput flag is what counts.
+      const toolbox = fakeToolbox({ a: async () => fail("Error: latitude must be a number", "never", { invalidInput: true }) });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const policy = scripted([act("a"), { answer: "ok" }]);
       await run(harness, policy);
@@ -154,8 +154,26 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
       assert.doesNotMatch(policy.seen.observations[0].content, /general knowledge/);
     });
 
+    test('retry "never": no second try, but the model still falls back on its own knowledge', async () => {
+      // e.g. Overpass, which already tried both of its servers before giving up
+      const toolbox = fakeToolbox({ a: async () => fail("Error: OpenStreetMap (Overpass) is overloaded right now.", "never") });
+      const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
+      const policy = scripted([act("a"), { answer: "ok" }]);
+      const { events } = await run(harness, policy);
+      assert.equal(toolbox.calls.length, 1);
+      assert.equal(events.filter((e) => e.type === "retry").length, 0);
+      assert.match(policy.seen.observations[0].content, /general knowledge/);
+    });
+
+    test("a toolbox that doesn't say how to retry gets one second try", async () => {
+      const toolbox = fakeToolbox({ a: async () => ({ text: "Error: ?", ui: null, isError: true }) });
+      const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
+      await run(harness, scripted([act("a"), { answer: "ok" }]));
+      assert.equal(toolbox.calls.length, 2);
+    });
+
     test("circuit breaker: a tool that keeps failing is skipped for the rest of the run", async () => {
-      const toolbox = fakeToolbox({ a: async () => ({ text: "Error: overloaded", ui: null, isError: true, retryable: false }) });
+      const toolbox = fakeToolbox({ a: async () => fail("Error: overloaded", "once") });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const call = (q) => ({ thought: "", actions: [{ id: q, tool: "a", input: { q } }] });
       const policy = scripted([call("1"), call("2"), call("3"), { answer: "done" }]);
@@ -194,7 +212,7 @@ for (const [label, Harness] of [["ReAct loop", ReActHarness], ["LangGraph", Lang
     });
 
     test("never caches errors", async () => {
-      const toolbox = fakeToolbox({ a: async () => ({ text: "Error: x", ui: null, isError: true, retryable: false }) });
+      const toolbox = fakeToolbox({ a: async () => fail("Error: x", "once") });
       const harness = new Harness({ toolbox, retryBaseDelayMs: 1 });
       const cache = new Map();
       await run(harness, scripted([act("a"), { answer: "1" }]), { cache });

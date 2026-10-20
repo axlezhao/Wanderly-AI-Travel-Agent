@@ -7,7 +7,7 @@
 //   - model retries: a model request that fails for a temporary reason (rate
 //     limit, overload, network drop) is re-sent with backoff, for every provider
 //   - parallel actions within a step
-//   - per-tool timeouts; every failed lookup is tried a second time
+//   - per-tool timeouts; failed lookups are retried the way the tool asks
 //     (transient errors like 429/5xx/timeouts up to maxRetries more times)
 //   - LLM fallback: when a lookup still fails, the observation tells the model
 //     to fill that gap from its own knowledge, labeled as such

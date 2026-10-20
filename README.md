@@ -74,7 +74,7 @@ The model only decides *what to do next*. [`src/harness/harness.js`](src/harness
 |---|---|
 | **Step limit** (`MAX_STEPS`, default 6), last step forces an answer | no infinite loops; you always get *something* |
 | **Parallel actions** within a step | weather + sights + restaurants at once |
-| **Per-tool timeout** (60 s); every failed lookup is **tried a second time** (temporary errors like 429/5xx/timeouts up to 3 times) | free public APIs are flaky |
+| **Per-tool timeout** (60 s); **retries the tool asks for**: each error carries `_meta.retry`: `transient` (429/5xx/timeouts, up to 3 tries with backoff), `once` (unexpected, one more try) or `never` (nothing found, bad arguments, or the tool already retried, like Overpass trying both of its servers) | free public APIs are flaky, but a retry that can't help only makes you wait |
 | **LLM fallback**: if a lookup still fails, the model fills that part from its own knowledge, labeled "(general knowledge, not live data)" | you still get a complete plan, and you know what isn't live data |
 | **Circuit breaker**: a tool that fails twice in one request is skipped after that | no waiting on a service that's down |
 | **Model retries** for every provider: a model request that fails for a temporary reason (429, 5xx, overloaded, network drop, cut-off stream) is re-sent up to 2 more times with backoff, honoring `Retry-After`; bad keys or bad requests fail immediately | a busy model API doesn't kill your trip plan |
