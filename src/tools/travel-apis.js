@@ -4,16 +4,25 @@
 // Every function returns { result, ui }:
 //   result -> compact JSON for the agent to reason over (the "Observation")
 //   ui     -> richer data the browser uses to draw the map and trip panel
-// and throws ToolError on failure (retryable=true for transient network errors).
+// and throws ToolError on failure, saying whether trying again could help (see retryOf).
 
 const USER_AGENT = "Wanderly/1.0 (https://github.com/axlezhao/Wanderly-AI-Travel-Agent)";
 
+// How a caller should retry a failed call (sent to the harness as _meta.retry):
+//   "transient"  a temporary failure (timeout, 429, 5xx): retry with backoff
+//   "once"       an unexpected failure: one more try might work
+//   "never"      the same call will fail the same way (nothing found, bad input,
+//                or this module already retried and gave up)
 export class ToolError extends Error {
-  constructor(message, { retryable = false } = {}) {
+  constructor(message, { retry = "never" } = {}) {
     super(message);
-    this.retryable = retryable;
+    this.retry = retry;
   }
 }
+
+// Anything that isn't a ToolError is a bug or a malformed response: worth one more try.
+export const retryOf = (err) => (err instanceof ToolError ? err.retry : "once");
+const TRANSIENT_STATUS = (status) => status === 408 || status === 425 || status === 429 || status >= 500;
 
 // Small in-memory response cache shared by all sessions: free APIs appreciate
 // not being asked the same question twice, and repeat trips load instantly.
@@ -43,10 +52,10 @@ async function fetchJSON(url, { timeoutMs = 15000, signal, ...options } = {}) {
     });
   } catch (err) {
     if (signal?.aborted) throw new ToolError("Cancelled.");
-    throw new ToolError(`${host} unreachable (${err.name === "TimeoutError" ? "timed out" : err.message})`, { retryable: true });
+    throw new ToolError(`${host} unreachable (${err.name === "TimeoutError" ? "timed out" : err.message})`, { retry: "transient" });
   }
   if (!res.ok) {
-    throw new ToolError(`${host} responded ${res.status}`, { retryable: res.status === 429 || res.status >= 500 });
+    throw new ToolError(`${host} responded ${res.status}`, { retry: TRANSIENT_STATUS(res.status) ? "transient" : "never" });
   }
   return res.json();
 }
@@ -112,7 +121,7 @@ export async function getTravelGuide({ place }, { signal } = {}) {
       lastError = err;
     }
   }
-  throw new ToolError(`No travel guide found for "${place}".`, { retryable: lastError?.retryable ?? false });
+  throw new ToolError(`No travel guide found for "${place}".`, { retry: lastError ? retryOf(lastError) : "never" });
 }
 
 // ---------------------------------------------------------------------------
@@ -218,15 +227,15 @@ async function overpassRequest(query, signal) {
     try {
       return await post(OVERPASS_PRIMARY, 12000);
     } catch (err) {
-      if (!err.retryable) throw err;
+      if (retryOf(err) !== "transient") throw err;
     }
   }
   try {
     return await post(OVERPASS_FALLBACK, 18000);
   } catch (err) {
     if (signal?.aborted) throw err;
-    // Already retried here, so tell the harness not to retry again.
-    throw new ToolError("OpenStreetMap (Overpass) is overloaded right now. Try a smaller radius or skip this lookup.");
+    // Both servers already had their tries (up to ~45 s), so the harness must not start over.
+    throw new ToolError("OpenStreetMap (Overpass) is overloaded right now. Try a smaller radius or skip this lookup.", { retry: "never" });
   }
 }
 
@@ -478,7 +487,7 @@ export async function compareRoutes(
     }),
   );
   if (options.every((o) => o.minutes == null)) {
-    throw new ToolError(`No routes found between ${from.name} and ${to.name}.`, { retryable: true });
+    throw new ToolError(`No routes found between ${from.name} and ${to.name}.`, { retry: "transient" });
   }
 
   const recommended = recommendMode(options);
@@ -504,7 +513,7 @@ export async function getExchangeRate({ from, to, amount = 1 }, { signal } = {})
   try {
     data = await getJSON(`https://api.frankfurter.dev/v1/latest?from=${f}&to=${t}`, { signal });
   } catch (err) {
-    if (err.retryable) throw err;
+    if (retryOf(err) === "transient") throw err;
     throw new ToolError(`No rate for ${f} → ${t}. Only ~30 major currencies are supported.`);
   }
   const rate = data.rates[t];

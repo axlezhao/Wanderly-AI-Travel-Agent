@@ -74,7 +74,7 @@ The model only decides *what to do next*. [`src/harness/harness.js`](src/harness
 |---|---|
 | **Step limit** (`MAX_STEPS`, default 6), last step forces an answer | no infinite loops; you always get *something* |
 | **Parallel actions** within a step | weather + sights + restaurants at once |
-| **Per-tool timeout** (60 s); every failed lookup is **tried a second time** (temporary errors like 429/5xx/timeouts up to 3 times) | free public APIs are flaky |
+| **Per-tool timeout** (60 s); **retries the tool asks for**: each error carries `_meta.retry`: `transient` (429/5xx/timeouts, up to 3 tries with backoff), `once` (unexpected, one more try) or `never` (nothing found, bad arguments, or the tool already retried, like Overpass trying both of its servers) | free public APIs are flaky, but a retry that can't help only makes you wait |
 | **LLM fallback**: if a lookup still fails, the model fills that part from its own knowledge, labeled "(general knowledge, not live data)" | you still get a complete plan, and you know what isn't live data |
 | **Circuit breaker**: a tool that fails twice in one request is skipped after that | no waiting on a service that's down |
 | **Model retries** for every provider: a model request that fails for a temporary reason (429, 5xx, overloaded, network drop, cut-off stream) is re-sent up to 2 more times with backoff, honoring `Retry-After`; bad keys or bad requests fail immediately | a busy model API doesn't kill your trip plan |
@@ -85,6 +85,17 @@ The model only decides *what to do next*. [`src/harness/harness.js`](src/harness
 | **Structured events + JSONL traces** in `traces/` | watch it live, debug it later |
 
 A policy is anything with `decide()` and `observe()`, so adding a new brain doesn't touch the harness.
+
+### Optional: the same loop as a LangGraph graph
+
+[`src/harness/langgraph-harness.js`](src/harness/langgraph-harness.js) runs the identical ReAct loop as a [LangGraph.js](https://langchain-ai.github.io/langgraphjs/) state graph: a `decide` node, one `tool` task per Action (a `Send` fan-out, so they run in parallel) and an `observe` node, with events on LangGraph's custom stream. It takes the same policies and emits the same events, so the UI, evals and tests work unchanged. Both harnesses share the step mechanics in [`src/harness/steps.js`](src/harness/steps.js), so they differ only in orchestration.
+
+```bash
+npm run start:langgraph                                    # or HARNESS=langgraph npm start
+npm run eval -- --model demo --harness react,langgraph     # run both and compare
+```
+
+The hand-written loop stays the default. The graph version is the starting point for features where a graph pays off: a planner/critic split, human-in-the-loop pauses, or checkpointed sessions that survive a restart.
 
 ### The MCP server (Node.js or Go)
 
@@ -152,11 +163,12 @@ To add a new kind of provider, write a policy class in `src/policies/` with `add
 ## Tests and evals
 
 ```bash
-npm test                                   # 38 offline tests: harness, memory, MCP contract (Node + Go servers), policies
+npm test                                   # 60 offline tests: harness (run against both harnesses), memory, MCP contract (Node + Go servers), policies
 npm run test:go                            # Go server unit tests (mock HTTP servers, in-memory MCP client)
 npm run eval                               # live end-to-end scenarios with the default model
 npm run eval -- --model demo               # a specific model (ids: npm run eval -- --list)
 npm run eval -- --only kyoto,lisbon-food   # a subset
+npm run eval -- --harness react,langgraph  # both harnesses side by side
 ```
 
 `npm test` needs no network or keys. It uses a fake toolbox, scripted policies, and a mock OpenAI-style server that streams fragmented tool calls. If Go is installed, it also runs the MCP contract tests against the Go server.
@@ -173,6 +185,9 @@ public/                       UI (vanilla JS + Leaflet map, no build step)
 src/
   harness/
     harness.js                the ReAct loop and its guarantees
+    langgraph-harness.js      the same loop as a LangGraph graph (HARNESS=langgraph)
+    steps.js                  decide + act mechanics shared by both harnesses
+    create.js                 picks a harness by name
     toolbox.js                MCP client (spawns + talks to the MCP server)
     tracer.js                 JSONL traces → traces/
     labels.js                 human-readable action/observation labels

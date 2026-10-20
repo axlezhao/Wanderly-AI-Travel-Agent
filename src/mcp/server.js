@@ -7,7 +7,9 @@
 // Each tool result has:
 //   content[0].text -> the JSON observation the model reads
 //   _meta.ui        -> extra data for the web UI (images, map pins); other MCP clients ignore it
-//   _meta.retryable -> on errors, whether trying again might help (used by the harness)
+//   _meta.retry     -> on errors, "transient" | "once" | "never": whether and how trying
+//                      again could help (used by the harness). Errors the MCP SDK produces
+//                      itself, before a tool runs (bad arguments, unknown tool), have no _meta.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -22,6 +24,7 @@ import {
   compareRoutes,
   PLACE_CATEGORIES,
   ROUTE_MODES,
+  retryOf,
 } from "../tools/travel-apis.js";
 
 const server = new McpServer({ name: "travel-tools", version: "1.0.0" });
@@ -41,7 +44,7 @@ function register(name, config, fn) {
       return {
         isError: true,
         content: [{ type: "text", text: `Error: ${err.message}` }],
-        _meta: { retryable: Boolean(err.retryable) },
+        _meta: { retry: retryOf(err) },
       };
     }
   });

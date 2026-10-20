@@ -138,7 +138,11 @@ func getTravelGuide(ctx context.Context, in GuideInput) (any, any, error) {
 		ui := map[string]any{"kind": "guide", "title": summary.Title, "summary": summary.Extract, "image": image, "url": pageURL, "source": source}
 		return result, ui, nil
 	}
-	return nil, nil, &ToolError{Msg: fmt.Sprintf("No travel guide found for %q.", in.Place), Retryable: isRetryable(lastErr)}
+	retry := RetryNever
+	if lastErr != nil {
+		retry = retryOf(lastErr)
+	}
+	return nil, nil, &ToolError{Msg: fmt.Sprintf("No travel guide found for %q.", in.Place), Retry: retry}
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +304,7 @@ func overpass(ctx context.Context, query string) ([]osmElement, error) {
 		if err == nil {
 			return data.Elements, nil
 		}
-		if !isRetryable(err) {
+		if retryOf(err) != RetryTransient {
 			return nil, err
 		}
 	}
@@ -308,7 +312,7 @@ func overpass(ctx context.Context, query string) ([]osmElement, error) {
 		if ctx.Err() != nil {
 			return nil, permanent("Cancelled.")
 		}
-		// Already retried here, so tell the harness not to retry again.
+		// Both servers already had their tries (up to ~45 s), so the harness must not start over.
 		return nil, permanent("OpenStreetMap (Overpass) is overloaded right now. Try a smaller radius or skip this lookup.")
 	}
 	return data.Elements, nil
@@ -637,7 +641,7 @@ func getExchangeRate(ctx context.Context, in ExchangeInput) (any, any, error) {
 	}
 	u := fmt.Sprintf("%s?from=%s&to=%s", frankfurterURL, url.QueryEscape(from), url.QueryEscape(to))
 	if err := getJSON(ctx, request{url: u}, &data); err != nil {
-		if isRetryable(err) {
+		if retryOf(err) == RetryTransient {
 			return nil, nil, err
 		}
 		return nil, nil, permanent("No rate for %s → %s. Only ~30 major currencies are supported.", from, to)
@@ -926,7 +930,7 @@ func compareRoutes(ctx context.Context, in RoutesInput) (any, any, error) {
 		found = found || o.Minutes != nil
 	}
 	if !found {
-		return nil, nil, &ToolError{Msg: fmt.Sprintf("No routes found between %s and %s.", from.Name, to.Name), Retryable: true}
+		return nil, nil, &ToolError{Msg: fmt.Sprintf("No routes found between %s and %s.", from.Name, to.Name), Retry: RetryTransient}
 	}
 
 	recommended := recommendMode(options)
